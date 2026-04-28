@@ -49,9 +49,20 @@ int main()
         }
     }
 
+    p.reset(); p1.reset();
+
     hotfuzz::fuzz(
         [](float x, int y) -> float { return x + y; },
         hotfuzz::run_mode::zip,
+        p,
+        p1
+    );
+
+    p.reset(); p1.reset();
+
+    hotfuzz::fuzz(
+        [](float x, int y) -> float { auto b = x + y; std::cout << b << std::endl; return b; },
+        hotfuzz::run_mode::grid,
         p,
         p1
     );

@@ -1,5 +1,5 @@
-#ifndef CONCEPTS_H
-#define CONCEPTS_H
+#ifndef SPECS_H
+#define SPECS_H
 
 #include <concepts>
 #include <ranges>
@@ -26,4 +26,4 @@ namespace hotfuzz
 }
 
 
-#endif // CONCEPTS_H
+#endif // SPECS_H
