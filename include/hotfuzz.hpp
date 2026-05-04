@@ -6,7 +6,7 @@
 #include <tuple>
 #include <utility>
 
-#include "base_provider.hpp"
+#include "data/base_provider.hpp"
 #include "specs.h"
 
 namespace hotfuzz
