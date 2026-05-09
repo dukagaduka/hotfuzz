@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "serialization/serialization.hpp"
+#include "serialization/api.hpp"
 
 namespace hotfuzz
 {
@@ -23,10 +23,10 @@ namespace hotfuzz
         static std::vector<std::uint8_t> to_bytes(const std::optional<T>& value)
         {
             std::vector<std::uint8_t> bytes;
-            detail::write_value(bytes, value.has_value());
+            utils::write_value(bytes, value.has_value());
 
             if (value.has_value())
-                detail::write_value(bytes, *value);
+                utils::write_value(bytes, *value);
 
             return bytes;
         }
@@ -35,8 +35,8 @@ namespace hotfuzz
         {
             using value_type = std::remove_cv_t<T>;
 
-            byte_reader reader(bytes);
-            const bool has_value = detail::read_value<bool>(reader);
+            utils::byte_reader reader(bytes);
+            const bool has_value = utils::read_value<bool>(reader);
 
             if (!has_value)
             {
@@ -46,7 +46,7 @@ namespace hotfuzz
                 return std::optional<T>{};
             }
 
-            auto value = detail::read_value<value_type>(reader);
+            auto value = utils::read_value<value_type>(reader);
 
             if (!reader.empty())
                 throw std::runtime_error("trailing bytes after std::optional blob");

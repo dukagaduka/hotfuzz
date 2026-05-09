@@ -1,5 +1,5 @@
-#ifndef BASE_PROVIDER_HPP
-#define BASE_PROVIDER_HPP
+#ifndef DATA_BASE_PROVIDER_HPP
+#define DATA_BASE_PROVIDER_HPP
 
 #include <cstdint>
 #include <iostream>
@@ -56,4 +56,4 @@ namespace hotfuzz
     };
 }
 
-#endif // BASE_PROVIDER_HPP
+#endif // DATA_BASE_PROVIDER_HPP

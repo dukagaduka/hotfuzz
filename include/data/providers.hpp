@@ -1,14 +1,14 @@
-#ifndef PROVIDERS_HPP
-#define PROVIDERS_HPP
+#ifndef DATA_PROVIDERS_HPP
+#define DATA_PROVIDERS_HPP
 
 #include <concepts>
 #include <cstdint>
 #include <vector>
 #include <ranges>
 
-#include "base_provider.hpp"
-#include "specs.h"
-#include "generators.hpp"
+#include "data/base_provider.hpp"
+#include "data/generators.hpp"
+#include "data/specs.h"
 
 namespace hotfuzz
 {
@@ -53,7 +53,7 @@ namespace hotfuzz
         : base_provider<T>(max_idx), m_generator(seed, true_probability) {}
 
     template <standard_type T>
-    T std_random_provider<T>::next() 
+    inline T std_random_provider<T>::next() 
     {
         return m_generator();
     }
@@ -97,14 +97,14 @@ namespace hotfuzz
     }
 
     template <std::ranges::range R>
-    void iterable_provider<R>::reset()
+    inline void iterable_provider<R>::reset()
     {
         base_provider<value_type>::reset();
         m_current = std::ranges::begin(*m_object);
     }
 
     template <std::ranges::range R>
-    typename iterable_provider<R>::value_type iterable_provider<R>::next()
+    inline typename iterable_provider<R>::value_type iterable_provider<R>::next()
     {
         value_type value = static_cast<value_type>(*m_current);
         ++m_current;
@@ -118,4 +118,4 @@ namespace hotfuzz
     }
 }
 
-#endif // PROVIDERS_HPP
+#endif // DATA_PROVIDERS_HPP

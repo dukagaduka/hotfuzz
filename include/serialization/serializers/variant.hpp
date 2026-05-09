@@ -9,7 +9,7 @@
 #include <variant>
 #include <vector>
 
-#include "serialization/serialization.hpp"
+#include "serialization/api.hpp"
 
 namespace hotfuzz
 {
@@ -31,12 +31,12 @@ namespace hotfuzz
                 throw std::runtime_error("cannot serialize valueless std::variant");
 
             std::vector<std::uint8_t> bytes;
-            detail::write_value(bytes, value.index());
+            utils::write_value(bytes, value.index());
 
             std::visit(
                 [&bytes](const auto& active_value)
                 {
-                    detail::write_value(bytes, active_value);
+                    utils::write_value(bytes, active_value);
                 },
                 value
             );
@@ -48,25 +48,25 @@ namespace hotfuzz
         {
             using variant_type = std::variant<Ts...>;
 
-            byte_reader reader(bytes);
-            const std::size_t index = detail::read_value<std::size_t>(reader);
+            utils::byte_reader reader(bytes);
+            const std::size_t index = utils::read_value<std::size_t>(reader);
 
             auto result = []<std::size_t... I>(
-                byte_reader& current_reader,
+                utils::byte_reader& current_reader,
                 std::size_t active_index,
                 std::index_sequence<I...>
             ) -> variant_type
             {
-                using maker_type = variant_type (*)(byte_reader&);
+                using maker_type = variant_type (*)(utils::byte_reader&);
 
                 // Runtime variant index is resolved through one reader function per alternative.
                 static constexpr maker_type makers[] = {
-                    +[](byte_reader& reader_for_value) -> variant_type
+                    +[](utils::byte_reader& reader_for_value) -> variant_type
                     {
                         using alternative_type = std::remove_cv_t<std::variant_alternative_t<I, variant_type>>;
                         return variant_type{
                             std::in_place_index<I>,
-                            detail::read_value<alternative_type>(reader_for_value)
+                            utils::read_value<alternative_type>(reader_for_value)
                         };
                     }...
                 };

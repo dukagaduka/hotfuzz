@@ -1,51 +1,23 @@
-#ifndef SERIALIZATION_HPP
-#define SERIALIZATION_HPP
+#ifndef SERIALIZATION_RW_UTILS_HPP
+#define SERIALIZATION_RW_UTILS_HPP
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <memory>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <type_traits>
 #include <vector>
+#include <type_traits>
 
-#include "serialization/helpers.hpp"
-#include "serialization/specs.h"
+#include "serialization/byte_utils.hpp"
 
 namespace hotfuzz
 {
-    /**
-     * @brief Serializes one supported value into a self-contained byte buffer.
-     */
-    template <serializable_v T>
-    [[nodiscard]] std::vector<std::uint8_t> to_bytes(const T& value);
-
-    /**
-     * @brief Deserializes one value from a bounded byte span.
-     *
-     * @throws std::runtime_error if the buffer is malformed or has trailing bytes.
-     */
-    template <serializable_v T>
-    [[nodiscard]] std::remove_cvref_t<T> from_bytes(std::span<const std::uint8_t> bytes);
-
-    /**
-     * @brief Deserializes one value from a byte vector.
-     *
-     * @throws std::runtime_error if the buffer is malformed or has trailing bytes.
-     */
-    template <serializable_v T>
-    [[nodiscard]] std::remove_cvref_t<T> from_bytes(const std::vector<std::uint8_t>& bytes);
-
-    namespace detail
+    namespace utils
     {
         /**
          * @brief Internal value writer used by the core and bundled serializers.
          */
         template <serializable_v T>
-        void write_value(std::vector<std::uint8_t>& out, const T& value);
+        inline void write_value(std::vector<std::uint8_t>& out, const T& value);
 
         /**
          * @brief Internal value reader used by the core and bundled serializers.
@@ -53,11 +25,13 @@ namespace hotfuzz
         template <serializable_v T>
         [[nodiscard]] std::remove_cvref_t<T> read_value(byte_reader& reader);
 
+        
+
         /**
          * @brief Dedicated std::array path with serialized size validation.
          */
         template <std_array_serializable_v T>
-        void write_array(std::vector<std::uint8_t>& out, const T& value)
+        inline void write_array(std::vector<std::uint8_t>& out, const T& value)
         {
             using value_type = std::remove_cvref_t<T>;
             using element_type = std::remove_cv_t<std_array_value_t<value_type>>;
@@ -114,11 +88,13 @@ namespace hotfuzz
             }
         }
 
+
+
         /**
          * @brief Dedicated std::vector path.
          */
         template <std_vector_serializable_v T>
-        void write_vector(std::vector<std::uint8_t>& out, const T& value)
+        inline void write_vector(std::vector<std::uint8_t>& out, const T& value)
         {
             using value_type = std::remove_cvref_t<T>;
             using element_type = std_vector_value_t<value_type>;
@@ -172,11 +148,13 @@ namespace hotfuzz
             return vector;
         }
 
+
+
         /**
          * @brief Dedicated std::basic_string path using raw character bytes.
          */
         template <std_basic_string_serializable_v T>
-        void write_string(std::vector<std::uint8_t>& out, const T& value)
+        inline void write_string(std::vector<std::uint8_t>& out, const T& value)
         {
             using value_type = std::remove_cvref_t<T>;
             using char_type = std_basic_string_char_t<value_type>;
@@ -209,11 +187,13 @@ namespace hotfuzz
             return string;
         }
 
+
+        
         /**
          * @brief Dispatches a supported value into the first matching serialization basket.
          */
         template <serializable_v T>
-        void write_value(std::vector<std::uint8_t>& out, const T& value)
+        inline void write_value(std::vector<std::uint8_t>& out, const T& value)
         {
             using value_type = std::remove_cvref_t<T>;
 
@@ -291,39 +271,6 @@ namespace hotfuzz
             }
         }
     }
-
-    template <serializable_v T>
-    [[nodiscard]] std::vector<std::uint8_t> to_bytes(const T& value)
-    {
-        std::vector<std::uint8_t> bytes;
-        detail::write_value(bytes, value);
-        return bytes;
-    }
-
-    template <serializable_v T>
-    [[nodiscard]] std::remove_cvref_t<T> from_bytes(std::span<const std::uint8_t> bytes)
-    {
-        byte_reader reader(bytes);
-        auto value = detail::read_value<T>(reader);
-
-        if (!reader.empty())
-            throw std::runtime_error("trailing bytes after serialized object");
-
-        return value;
-    }
-
-    template <serializable_v T>
-    [[nodiscard]] std::remove_cvref_t<T> from_bytes(const std::vector<std::uint8_t>& bytes)
-    {
-        return from_bytes<T>(std::span<const std::uint8_t>{bytes.data(), bytes.size()});
-    }
 }
 
-#include "serialization/serializers/pair.hpp"
-#include "serialization/serializers/tuple.hpp"
-#include "serialization/serializers/optional.hpp"
-#include "serialization/serializers/variant.hpp"
-#include "serialization/serializers/map.hpp"
-#include "serialization/serializers/set.hpp"
-
-#endif // SERIALIZATION_HPP
+#endif // SERIALIZATION_RW_UTILS_HPP

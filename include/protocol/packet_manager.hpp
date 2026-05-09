@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -11,87 +12,19 @@
 #include <variant>
 #include <vector>
 
-#include "protocol/helpers.hpp"
+#include "serialization/api.hpp"
+#include "protocol/io_utils.hpp"
+#include "protocol/packet.hpp"
 #include "protocol/specs.h"
-#include "serialization/serialization.hpp"
 
 namespace hotfuzz
 {
     /**
-     * @brief Decoded protocol packet for the tuple type handled by packet_manager.
-     *
-     * The payload is either empty, std::tuple<Ts...>, or std::string depending
-     * on payload_kind.
-     */
-    template <typename... Ts>
-    struct packet
-    {
-        using args_tuple = std::tuple<Ts...>;
-        using payload_variant = std::variant<std::monostate, args_tuple, std::string>;
-
-        packet_header header {};
-        payload_variant payload {};
-
-        /**
-         * @brief Returns the logical packet kind stored in the header.
-         */
-        [[nodiscard]] packet_kind kind() const noexcept
-        {
-            return static_cast<packet_kind>(header.kind);
-        }
-
-        /**
-         * @brief Returns the payload kind stored in the header.
-         */
-        [[nodiscard]] payload_kind payload_type() const noexcept
-        {
-            return static_cast<payload_kind>(header.payload_kind);
-        }
-
-        /**
-         * @brief Returns the task id associated with this packet.
-         */
-        [[nodiscard]] std::uint64_t task_id() const noexcept
-        {
-            return header.task_id;
-        }
-
-        /**
-         * @brief Returns header flags carried by this packet.
-         */
-        [[nodiscard]] std::uint16_t flags() const noexcept
-        {
-            return header.flags;
-        }
-
-        /**
-         * @brief Returns tuple payload or throws when this packet does not carry one.
-         */
-        [[nodiscard]] const args_tuple& as_tuple() const
-        {
-            if (!std::holds_alternative<args_tuple>(payload))
-                throw protocol_error("packet payload is not a tuple");
-
-            return std::get<args_tuple>(payload);
-        }
-
-        /**
-         * @brief Returns text payload or throws when this packet does not carry one.
-         */
-        [[nodiscard]] const std::string& as_text() const
-        {
-            if (!std::holds_alternative<std::string>(payload))
-                throw protocol_error("packet payload is not text");
-
-            return std::get<std::string>(payload);
-        }
-    };
-
-    /**
      * @brief High-level packet protocol API over read/write file descriptors.
      *
      * It owns framing, header validation, payload serialization, and payload
-     * decoding. Worker code should deal with decoded packets, not raw bytes.
+     * decoding. Transport failures are reported as ipc_error subclasses, while
+     * malformed frames and decode failures are protocol_error.
      */
     template <typename... Ts>
     class packet_manager
@@ -100,158 +33,64 @@ namespace hotfuzz
         using args_tuple = std::tuple<Ts...>;
         using packet_type = packet<Ts...>;
 
-        /**
-         * @brief Uses the same fd for reads and writes.
-         */
         explicit packet_manager(int fd);
-
-        /**
-         * @brief Uses separate read and write descriptors.
-         */
         packet_manager(int read_fd, int write_fd);
 
-        /**
-         * @brief Sends a run packet with a tuple payload.
-         */
-        [[nodiscard]] bool send_run(
+
+        void send_run(
             std::uint64_t task_id,
             const args_tuple& args,
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
             std::uint16_t flags = 0
         );
 
-        /**
-         * @brief Sends an ok packet without payload.
-         */
-        [[nodiscard]] bool send_ok(std::uint64_t task_id, std::uint16_t flags = 0);
+        void send_ok(
+            std::uint64_t task_id,
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
+            std::uint16_t flags = 0
+        );
 
-        /**
-         * @brief Sends a stop packet without payload.
-         */
-        [[nodiscard]] bool send_stop(std::uint16_t flags = 0);
+        void send_stop(
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
+            std::uint16_t flags = 0
+        );
 
-        /**
-         * @brief Sends an exception packet with text payload.
-         */
-        [[nodiscard]] bool send_exception(
+        void send_exception(
             std::uint64_t task_id,
             std::string_view text,
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
             std::uint16_t flags = 0
         );
 
-        /**
-         * @brief Sends a protocol_error packet with text payload.
-         */
-        [[nodiscard]] bool send_protocol_error(
+        void send_protocol_error(
             std::uint64_t task_id,
             std::string_view text,
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
             std::uint16_t flags = 0
         );
 
-        /**
-         * @brief Sends an arbitrary text-carrying packet kind.
-         */
-        [[nodiscard]] bool send_text(
+        void send_text(
             packet_kind kind,
             std::uint64_t task_id,
             std::string_view text,
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero(),
             std::uint16_t flags = 0
         );
 
-        /**
-         * @brief Sends a run packet with a tuple payload before timeout expires.
-         */
-        [[nodiscard]] bool send_run_for(
-            std::uint64_t task_id,
-            const args_tuple& args,
-            std::chrono::milliseconds timeout,
-            std::uint16_t flags = 0
+        [[nodiscard]] packet_type receive(
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero()
         );
-
-        /**
-         * @brief Sends an ok packet before timeout expires.
-         */
-        [[nodiscard]] bool send_ok_for(
-            std::uint64_t task_id,
-            std::chrono::milliseconds timeout,
-            std::uint16_t flags = 0
-        );
-
-        /**
-         * @brief Sends a stop packet before timeout expires.
-         */
-        [[nodiscard]] bool send_stop_for(
-            std::chrono::milliseconds timeout,
-            std::uint16_t flags = 0
-        );
-
-        /**
-         * @brief Sends an exception packet with text payload before timeout expires.
-         */
-        [[nodiscard]] bool send_exception_for(
-            std::uint64_t task_id,
-            std::string_view text,
-            std::chrono::milliseconds timeout,
-            std::uint16_t flags = 0
-        );
-
-        /**
-         * @brief Sends a protocol_error packet with text payload before timeout expires.
-         */
-        [[nodiscard]] bool send_protocol_error_for(
-            std::uint64_t task_id,
-            std::string_view text,
-            std::chrono::milliseconds timeout,
-            std::uint16_t flags = 0
-        );
-
-        /**
-         * @brief Sends an arbitrary text-carrying packet before timeout expires.
-         */
-        [[nodiscard]] bool send_text_for(
-            packet_kind kind,
-            std::uint64_t task_id,
-            std::string_view text,
-            std::chrono::milliseconds timeout,
-            std::uint16_t flags = 0
-        );
-
-        /**
-         * @brief Reads, validates, and decodes one packet.
-         */
-        [[nodiscard]] packet_type receive();
-
-        /**
-         * @brief Reads, validates, and decodes one packet before timeout expires.
-         */
-        [[nodiscard]] packet_type receive_for(std::chrono::milliseconds timeout);
 
     private:
-        /**
-         * @brief Writes a complete header + payload frame.
-         */
-        [[nodiscard]] bool send_packet(
-            packet_kind kind,
-            payload_kind payload_type,
-            std::uint64_t task_id,
-            std::uint16_t flags,
-            const std::vector<std::uint8_t>& payload
-        );
-
-        /**
-         * @brief Writes a complete header + payload frame before timeout expires.
-         */
-        [[nodiscard]] bool send_packet_for(
+        void send_packet(
             packet_kind kind,
             payload_kind payload_type,
             std::uint64_t task_id,
             std::uint16_t flags,
             const std::vector<std::uint8_t>& payload,
-            std::chrono::milliseconds timeout
+            std::chrono::milliseconds timeout = std::chrono::milliseconds::zero()
         );
 
-        /**
-         * @brief Builds a checked packet header.
-         */
         [[nodiscard]] static packet_header make_header(
             packet_kind kind,
             payload_kind payload_type,
@@ -260,10 +99,14 @@ namespace hotfuzz
             std::size_t payload_size
         );
 
-        /**
-         * @brief Validates protocol identity and payload shape constraints.
-         */
         static void validate_header(const packet_header& header);
+        static void throw_io_failure(const io_result& result, std::string_view operation);
+        static void throw_protocol_decode(std::string_view message, const std::exception& e);
+
+        [[nodiscard]] packet_type decode_packet(
+            const packet_header& header,
+            const std::vector<std::uint8_t>& payload_bytes
+        ) const;
 
     private:
         int m_read_fd {};
@@ -271,11 +114,13 @@ namespace hotfuzz
 
     };
 
+
     template <typename... Ts>
     packet_manager<Ts...>::packet_manager(int fd)
         : m_read_fd(fd),
           m_write_fd(fd)
     {}
+
 
     template <typename... Ts>
     packet_manager<Ts...>::packet_manager(int read_fd, int write_fd)
@@ -283,31 +128,16 @@ namespace hotfuzz
           m_write_fd(write_fd)
     {}
 
-    template <typename... Ts>
-    bool packet_manager<Ts...>::send_run(
-        std::uint64_t task_id,
-        const args_tuple& args,
-        std::uint16_t flags
-    )
-    {
-        return send_packet(
-            packet_kind::run,
-            payload_kind::tuple,
-            task_id,
-            flags,
-            to_bytes(args)
-        );
-    }
 
     template <typename... Ts>
-    bool packet_manager<Ts...>::send_run_for(
+    inline void packet_manager<Ts...>::send_run(
         std::uint64_t task_id,
         const args_tuple& args,
         std::chrono::milliseconds timeout,
         std::uint16_t flags
     )
     {
-        return send_packet_for(
+        send_packet(
             packet_kind::run,
             payload_kind::tuple,
             task_id,
@@ -317,98 +147,54 @@ namespace hotfuzz
         );
     }
 
-    template <typename... Ts>
-    bool packet_manager<Ts...>::send_ok(std::uint64_t task_id, std::uint16_t flags)
-    {
-        return send_packet(packet_kind::ok, payload_kind::none, task_id, flags, {});
-    }
 
     template <typename... Ts>
-    bool packet_manager<Ts...>::send_ok_for(
+    inline void packet_manager<Ts...>::send_ok(
         std::uint64_t task_id,
         std::chrono::milliseconds timeout,
         std::uint16_t flags
     )
     {
-        return send_packet_for(packet_kind::ok, payload_kind::none, task_id, flags, {}, timeout);
+        send_packet(packet_kind::ok, payload_kind::none, task_id, flags, {}, timeout);
     }
 
+    
     template <typename... Ts>
-    bool packet_manager<Ts...>::send_stop(std::uint16_t flags)
-    {
-        return send_packet(packet_kind::stop, payload_kind::none, 0, flags, {});
-    }
-
-    template <typename... Ts>
-    bool packet_manager<Ts...>::send_stop_for(
+    inline void packet_manager<Ts...>::send_stop(
         std::chrono::milliseconds timeout,
         std::uint16_t flags
     )
     {
-        return send_packet_for(packet_kind::stop, payload_kind::none, 0, flags, {}, timeout);
+        send_packet(packet_kind::stop, payload_kind::none, 0, flags, {}, timeout);
     }
 
-    template <typename... Ts>
-    bool packet_manager<Ts...>::send_exception(
-        std::uint64_t task_id,
-        std::string_view text,
-        std::uint16_t flags
-    )
-    {
-        return send_text(packet_kind::exception, task_id, text, flags);
-    }
 
     template <typename... Ts>
-    bool packet_manager<Ts...>::send_exception_for(
+    inline void packet_manager<Ts...>::send_exception(
         std::uint64_t task_id,
         std::string_view text,
         std::chrono::milliseconds timeout,
         std::uint16_t flags
     )
     {
-        return send_text_for(packet_kind::exception, task_id, text, timeout, flags);
+        send_text(packet_kind::exception, task_id, text, timeout, flags);
     }
 
-    template <typename... Ts>
-    bool packet_manager<Ts...>::send_protocol_error(
-        std::uint64_t task_id,
-        std::string_view text,
-        std::uint16_t flags
-    )
-    {
-        return send_text(packet_kind::protocol_error, task_id, text, flags);
-    }
 
     template <typename... Ts>
-    bool packet_manager<Ts...>::send_protocol_error_for(
+    inline void packet_manager<Ts...>::send_protocol_error(
         std::uint64_t task_id,
         std::string_view text,
         std::chrono::milliseconds timeout,
         std::uint16_t flags
     )
     {
-        return send_text_for(packet_kind::protocol_error, task_id, text, timeout, flags);
+        send_text(packet_kind::protocol_error, task_id, text, timeout, flags);
     }
 
-    template <typename... Ts>
-    bool packet_manager<Ts...>::send_text(
-        packet_kind kind,
-        std::uint64_t task_id,
-        std::string_view text,
-        std::uint16_t flags
-    )
-    {
-        return send_packet(
-            kind,
-            payload_kind::text,
-            task_id,
-            flags,
-            to_bytes(std::string{text})
-        );
-    }
 
     template <typename... Ts>
-    bool packet_manager<Ts...>::send_text_for(
+    inline void packet_manager<Ts...>::send_text(
         packet_kind kind,
         std::uint64_t task_id,
         std::string_view text,
@@ -416,7 +202,7 @@ namespace hotfuzz
         std::uint16_t flags
     )
     {
-        return send_packet_for(
+        send_packet(
             kind,
             payload_kind::text,
             task_id,
@@ -426,70 +212,25 @@ namespace hotfuzz
         );
     }
 
+
     template <typename... Ts>
-    packet<Ts...> packet_manager<Ts...>::receive()
+    inline typename packet_manager<Ts...>::packet_type packet_manager<Ts...>::receive(std::chrono::milliseconds timeout)
     {
+        io_result result {};
         packet_header header {};
-
-        if (!read_all(m_read_fd, &header, sizeof(header)))
-            throw protocol_error("failed to read packet header");
-
-        validate_header(header);
-
-        std::vector<std::uint8_t> payload_bytes(header.payload_size);
-
-        if (!payload_bytes.empty())
-        {
-            if (!read_all(m_read_fd, payload_bytes.data(), payload_bytes.size()))
-                throw protocol_error("failed to read packet payload");
-        }
-
-        packet_type packet {};
-        packet.header = header;
-
-        switch (static_cast<payload_kind>(header.payload_kind))
-        {
-            case payload_kind::none:
-                if (header.payload_size != 0)
-                    throw protocol_error("none packet payload must be empty");
-                    
-                packet.payload = std::monostate {};
-                break;
-
-            case payload_kind::tuple:
-                packet.payload = from_bytes<args_tuple>(payload_bytes);
-                break;
-
-            case payload_kind::text:
-                packet.payload = from_bytes<std::string>(payload_bytes);
-                break;
-
-            default:
-                throw protocol_error("unknown packet payload kind");
-        }
-
-        return packet;
-    }
-
-    template <typename... Ts>
-    packet<Ts...> packet_manager<Ts...>::receive_for(std::chrono::milliseconds timeout)
-    {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-        auto remaining_timeout = [&deadline]() -> std::chrono::milliseconds
+        if (timeout != std::chrono::milliseconds::zero())
         {
-            const auto now = std::chrono::steady_clock::now();
+            result = read_all_for(m_read_fd, &header, sizeof(header), utils::timeout_ms_until_chrono(deadline));
+        }
+        else
+        {
+            result = read_all(m_read_fd, &header, sizeof(header));
+        }
 
-            if (now >= deadline)
-                throw protocol_error("packet receive timed out");
-
-            return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-        };
-
-        packet_header header {};
-
-        if (!read_all_for(m_read_fd, &header, sizeof(header), remaining_timeout()))
-            throw protocol_error("failed to read packet header before timeout");
+        if (!result.ok())
+            throw_io_failure(result, "read packet header");
 
         validate_header(header);
 
@@ -497,62 +238,25 @@ namespace hotfuzz
 
         if (!payload_bytes.empty())
         {
-            if (!read_all_for(m_read_fd, payload_bytes.data(), payload_bytes.size(), remaining_timeout()))
-                throw protocol_error("failed to read packet payload before timeout");
+            if (timeout != std::chrono::milliseconds::zero())
+            {
+                result = read_all_for(m_read_fd, payload_bytes.data(), payload_bytes.size(), utils::timeout_ms_until_chrono(deadline));
+            }
+            else
+            {
+                result = read_all(m_read_fd, payload_bytes.data(), payload_bytes.size());
+            }
+
+            if (!result.ok())
+                throw_io_failure(result, "read packet payload");
         }
 
-        packet_type packet {};
-        packet.header = header;
-
-        switch (static_cast<payload_kind>(header.payload_kind))
-        {
-            case payload_kind::none:
-                if (header.payload_size != 0)
-                    throw protocol_error("none packet payload must be empty");
-
-                packet.payload = std::monostate {};
-                break;
-
-            case payload_kind::tuple:
-                packet.payload = from_bytes<args_tuple>(payload_bytes);
-                break;
-
-            case payload_kind::text:
-                packet.payload = from_bytes<std::string>(payload_bytes);
-                break;
-
-            default:
-                throw protocol_error("unknown packet payload kind");
-        }
-
-        return packet;
+        return decode_packet(header, payload_bytes);
     }
 
-    template <typename... Ts>
-    bool packet_manager<Ts...>::send_packet(
-        packet_kind kind,
-        payload_kind payload_type,
-        std::uint64_t task_id,
-        std::uint16_t flags,
-        const std::vector<std::uint8_t>& payload
-    )
-    {
-        const auto header = make_header(kind, payload_type, task_id, flags, payload.size());
-
-        if (!write_all(m_write_fd, &header, sizeof(header)))
-            return false;
-
-        if (!payload.empty())
-        {
-            if (!write_all(m_write_fd, payload.data(), payload.size()))
-                return false;
-        }
-
-        return true;
-    }
 
     template <typename... Ts>
-    bool packet_manager<Ts...>::send_packet_for(
+    inline void packet_manager<Ts...>::send_packet(
         packet_kind kind,
         payload_kind payload_type,
         std::uint64_t task_id,
@@ -561,40 +265,46 @@ namespace hotfuzz
         std::chrono::milliseconds timeout
     )
     {
+        io_result result {};
+        const auto header = make_header(kind, payload_type, task_id, flags, payload.size());
         const auto deadline = std::chrono::steady_clock::now() + timeout;
 
-        auto remaining_timeout = [&deadline]() -> std::chrono::milliseconds
+        if (timeout != std::chrono::milliseconds::zero())
         {
-            const auto now = std::chrono::steady_clock::now();
+            result = write_all_for(m_write_fd, &header, sizeof(header), utils::timeout_ms_until_chrono(deadline));
+        }
+        else
+        {
+            result = write_all(m_write_fd, &header, sizeof(header));
+        }
 
-            if (now >= deadline)
-                return std::chrono::milliseconds { 0 };
-
-            return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-        };
-
-        const auto header = make_header(kind, payload_type, task_id, flags, payload.size());
-
-        if (!write_all_for(m_write_fd, &header, sizeof(header), remaining_timeout()))
-            return false;
+        if (!result.ok())
+            throw_io_failure(result, "write packet header");
 
         if (!payload.empty())
         {
-            if (!write_all_for(m_write_fd, payload.data(), payload.size(), remaining_timeout()))
-                return false;
-        }
+            if (timeout != std::chrono::milliseconds::zero())
+            {
+                result = write_all_for(m_write_fd, payload.data(), payload.size(), utils::timeout_ms_until_chrono(deadline));
+            }
+            else
+            {
+                result = write_all(m_write_fd, payload.data(), payload.size());
+            }
 
-        return true;
+            if (!result.ok())
+                throw_io_failure(result, "write packet payload");
+        }
     }
 
+
     template <typename... Ts>
-    packet_header packet_manager<Ts...>::make_header(
+    inline packet_header packet_manager<Ts...>::make_header(
         packet_kind kind,
         payload_kind payload_type,
         std::uint64_t task_id,
         std::uint16_t flags,
-        std::size_t payload_size
-    )
+        std::size_t payload_size)
     {
         if (payload_size > std::numeric_limits<std::uint32_t>::max())
             throw protocol_error("packet payload is too large");
@@ -607,11 +317,14 @@ namespace hotfuzz
         header.task_id = task_id;
         header.payload_size = static_cast<std::uint32_t>(payload_size);
 
+        validate_header(header);
+
         return header;
     }
 
+
     template <typename... Ts>
-    void packet_manager<Ts...>::validate_header(const packet_header& header)
+    inline void packet_manager<Ts...>::validate_header(const packet_header& header)
     {
         if (header.magic != packet_magic)
             throw protocol_error("bad packet magic");
@@ -622,19 +335,125 @@ namespace hotfuzz
         if (header.header_size != sizeof(packet_header))
             throw protocol_error("unsupported packet header size");
 
+        const auto kind = static_cast<packet_kind>(header.kind);
         const auto payload_type = static_cast<payload_kind>(header.payload_kind);
+
+        switch (payload_type)
+        {
+            case payload_kind::none:
+            case payload_kind::tuple:
+            case payload_kind::text:
+                break;
+
+            default:
+                throw protocol_error("unknown packet payload kind");
+        }
+
+        switch (kind)
+        {
+            case packet_kind::run:
+                if (payload_type != payload_kind::tuple)
+                    throw protocol_error("run packet must carry tuple payload");
+                break;
+
+            case packet_kind::ok:
+                break;
+
+            case packet_kind::stop:
+                if (payload_type != payload_kind::none)
+                    throw protocol_error("empty packet kind must not carry payload");
+                break;
+
+            case packet_kind::exception:
+                if (payload_type != payload_kind::text)
+                    throw protocol_error("text packet kind must carry text payload");
+                break;
+
+            case packet_kind::protocol_error:
+                if (payload_type != payload_kind::text)
+                    throw protocol_error("text packet kind must carry text payload");
+                break;
+
+            default:
+                throw protocol_error("unknown packet kind");
+        }
 
         if (payload_type == payload_kind::none && header.payload_size != 0)
             throw protocol_error("none packet payload must be empty");
+    }
 
-        if (
-            payload_type != payload_kind::none &&
-            payload_type != payload_kind::tuple &&
-            payload_type != payload_kind::text
-        )
+
+    template <typename... Ts>
+    inline void packet_manager<Ts...>::throw_io_failure(const io_result& result, std::string_view operation)
+    {
+        std::string message(operation);
+
+        switch (result.status)
         {
-            throw protocol_error("unknown packet payload kind");
+            case io_status::timeout:
+                throw timeout_error(message + " timed out");
+
+            case io_status::eof:
+                throw disconnected_error(message + " reached EOF");
+
+            case io_status::disconnected:
+                throw disconnected_error(message + " disconnected");
+
+            case io_status::system_error:
+                throw ipc_error(message + " failed with errno " + std::to_string(result.error_number));
+
+            case io_status::ok:
+                return;
         }
+    }
+
+
+    template <typename... Ts>
+    inline void packet_manager<Ts...>::throw_protocol_decode(
+        std::string_view message,
+        const std::exception& e
+    )
+    {
+        throw protocol_error(std::string(message) + ": " + e.what());
+    }
+
+
+    template <typename... Ts>
+    inline typename packet_manager<Ts...>::packet_type packet_manager<Ts...>::decode_packet(
+        const packet_header& header,
+        const std::vector<std::uint8_t>& payload_bytes
+    ) const
+    {
+        packet_type packet {};
+        packet.header = header;
+
+        try
+        {
+            switch (static_cast<payload_kind>(header.payload_kind))
+            {
+                case payload_kind::none:
+                    packet.payload = std::monostate {};
+                    break;
+
+                case payload_kind::tuple:
+                    packet.payload = from_bytes<args_tuple>(payload_bytes);
+                    break;
+
+                case payload_kind::text:
+                    packet.payload = from_bytes<std::string>(payload_bytes);
+                    break;
+            }
+        }
+        catch (const protocol_error&)
+        {
+            throw;
+        }
+        catch (const std::exception& e)
+        {
+            throw_protocol_decode("failed to decode packet payload", e);
+        }
+
+        return packet;
     }
 }
 

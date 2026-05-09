@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "serialization/serialization.hpp"
+#include "serialization/api.hpp"
 
 namespace hotfuzz
 {
@@ -27,8 +27,8 @@ namespace hotfuzz
         static std::vector<std::uint8_t> to_bytes(const std::pair<A, B>& value)
         {
             std::vector<std::uint8_t> bytes;
-            detail::write_value(bytes, value.first);
-            detail::write_value(bytes, value.second);
+            utils::write_value(bytes, value.first);
+            utils::write_value(bytes, value.second);
             return bytes;
         }
 
@@ -37,9 +37,9 @@ namespace hotfuzz
             using first_type = std::remove_cv_t<A>;
             using second_type = std::remove_cv_t<B>;
 
-            byte_reader reader(bytes);
-            auto first = detail::read_value<first_type>(reader);
-            auto second = detail::read_value<second_type>(reader);
+            utils::byte_reader reader(bytes);
+            auto first = utils::read_value<first_type>(reader);
+            auto second = utils::read_value<second_type>(reader);
 
             if (!reader.empty())
                 throw std::runtime_error("trailing bytes after std::pair blob");

@@ -1,5 +1,5 @@
-#ifndef GENERATORS_HPP
-#define GENERATORS_HPP
+#ifndef DATA_GENERATORS_HPP
+#define DATA_GENERATORS_HPP
 
 #include <algorithm>
 #include <cmath>
@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "specs.h"
+#include "data/specs.h"
 
 namespace hotfuzz
 {
@@ -96,13 +96,13 @@ namespace hotfuzz
     };
 
     template <standard_type T>
-    std::uint32_t std_random_generator<T>::make_seed()
+    inline std::uint32_t std_random_generator<T>::make_seed()
     {
         return std::random_device{}();
     }
 
     template <standard_type T>
-    void std_random_generator<T>::validate_range(T low, T high) requires (!boolean<T>)
+    inline void std_random_generator<T>::validate_range(T low, T high) requires (!boolean<T>)
     {
         if constexpr (std::floating_point<T>)
         {
@@ -121,7 +121,7 @@ namespace hotfuzz
     }
 
     template <standard_type T>
-    void std_random_generator<T>::validate_probability(double true_probability) requires boolean<T>
+    inline void std_random_generator<T>::validate_probability(double true_probability) requires boolean<T>
     {
         if (!std::isfinite(true_probability) || true_probability < 0.0 || true_probability > 1.0)
         {
@@ -131,7 +131,7 @@ namespace hotfuzz
     }
 
     template <standard_type T>
-    void std_random_generator<T>::init_default_distribution()
+    inline void std_random_generator<T>::init_default_distribution()
     {
         if constexpr (not_boolean_integral<T>)
         {
@@ -158,7 +158,7 @@ namespace hotfuzz
     }
 
     template <standard_type T>
-    void std_random_generator<T>::init_range_distribution(T low, T high) requires (!boolean<T>)
+    inline void std_random_generator<T>::init_range_distribution(T low, T high) requires (!boolean<T>)
     {
         validate_range(low, high);
 
@@ -176,7 +176,7 @@ namespace hotfuzz
     }
 
     template <standard_type T>
-    void std_random_generator<T>::init_bool_distribution(double true_probability) requires boolean<T>
+    inline void std_random_generator<T>::init_bool_distribution(double true_probability) requires boolean<T>
     {
         validate_probability(true_probability);
 
@@ -234,7 +234,7 @@ namespace hotfuzz
     }
 
     template <standard_type T>
-    T std_random_generator<T>::operator()()
+    inline T std_random_generator<T>::operator()()
     {
         if constexpr (boolean<T>)
         {
@@ -247,7 +247,7 @@ namespace hotfuzz
     }
 
     template <standard_type T>
-    std::vector<T> std_random_generator<T>::operator()(std::size_t size)
+    inline std::vector<T> std_random_generator<T>::operator()(std::size_t size)
     {
         std::vector<T> values(size);
         std::generate(values.begin(), values.end(), [this]() { return this->operator()(); });
@@ -255,23 +255,23 @@ namespace hotfuzz
     }
 
     template <standard_type T>
-    T std_random_generator<T>::low() const noexcept
+    inline T std_random_generator<T>::low() const noexcept
     {
         return m_low;
     }
 
     template <standard_type T>
-    T std_random_generator<T>::high() const noexcept
+    inline T std_random_generator<T>::high() const noexcept
     {
         return m_high;
     }
 
     template <standard_type T>
-    std::uint32_t std_random_generator<T>::seed() const noexcept
+    inline std::uint32_t std_random_generator<T>::seed() const noexcept
     {
         return m_seed;
     }
 
 } 
 
-#endif // GENERATORS_HPP
+#endif // DATA_GENERATORS_HPP

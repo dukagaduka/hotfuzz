@@ -24,6 +24,8 @@ namespace hotfuzz
     template <typename>
     inline constexpr bool always_false_v = false;
 
+
+
     /**
      * @brief std::array detection and compile-time metadata.
      */
@@ -35,6 +37,7 @@ namespace hotfuzz
 
     template <typename T>
     inline constexpr bool is_std_array_v = is_std_array<std::remove_cvref_t<T>>::value;
+
 
     template <typename T>
     struct std_array_traits;
@@ -52,6 +55,8 @@ namespace hotfuzz
     template <typename T>
     inline constexpr std::size_t std_array_size_v = std_array_traits<std::remove_cvref_t<T>>::size;
 
+
+
     /**
      * @brief std::vector detection and element metadata.
      */
@@ -63,6 +68,7 @@ namespace hotfuzz
 
     template <typename T>
     inline constexpr bool is_std_vector_v = is_std_vector<std::remove_cvref_t<T>>::value;
+
 
     template <typename T>
     struct std_vector_traits;
@@ -85,6 +91,8 @@ namespace hotfuzz
     template <typename T>
     inline constexpr bool is_std_vector_bool_v = is_std_vector_bool<std::remove_cvref_t<T>>::value;
 
+
+
     /**
      * @brief std::basic_string detection and character metadata.
      */
@@ -97,6 +105,7 @@ namespace hotfuzz
     template <typename T>
     inline constexpr bool is_std_basic_string_v = is_std_basic_string<std::remove_cvref_t<T>>::value;
 
+
     template <typename T>
     struct std_basic_string_traits;
 
@@ -108,6 +117,8 @@ namespace hotfuzz
 
     template <typename T>
     using std_basic_string_char_t = typename std_basic_string_traits<std::remove_cvref_t<T>>::char_type;
+
+
 
     /**
      * @brief Public serialization baskets supported by the core serializer.
@@ -124,6 +135,7 @@ namespace hotfuzz
             { serializer<std::remove_cvref_t<T>>::from_bytes(bytes) } -> std::same_as<std::remove_cvref_t<T>>;
         };
 
+
     template <typename T>
     concept raw_serializable_v =
         !custom_serializable_v<T> &&
@@ -137,6 +149,7 @@ namespace hotfuzz
         !std::is_array_v<std::remove_cvref_t<T>> &&
         std::default_initializable<std::remove_cvref_t<T>> &&
         std::is_trivially_copyable_v<std::remove_cvref_t<T>>;
+
 
     /**
      * @brief Recursive support check used by serializable_v.
@@ -155,6 +168,7 @@ namespace hotfuzz
     template <typename T>
     struct is_serializable_type : is_serializable_type_impl<std::remove_cvref_t<T>> {};
 
+    
     template <typename T, std::size_t N>
     struct is_serializable_type_impl<std::array<T, N>>
         : std::bool_constant<
@@ -178,6 +192,7 @@ namespace hotfuzz
                 std::is_trivially_copyable_v<CharT>
             )
         > {};
+
 
     template <typename T>
     concept serializable_v = is_serializable_type<T>::value;

@@ -1,71 +1,51 @@
+#include <csignal>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
-#include "generators.hpp"
-#include "providers.hpp"
+#include "data/providers.hpp"
 #include "hotfuzz.hpp"
-
 
 int main()
 {
-    hotfuzz::std_random_generator<int> g(56, -7, 9);
+    std::vector<int> xs { -1, 1 };
+    std::vector<int> ys { 3, 5 };
 
-    for (int i = 0; i != 5; ++i)
-        std::cout << g() << std::endl;
+    hotfuzz::iterable_provider<decltype(xs)> x_provider(xs.size(), xs);
+    hotfuzz::iterable_provider<decltype(ys)> y_provider(ys.size(), ys);
 
-    for (auto i : g(10))
-        std::cout << i << " [*] ";
-
-    std::cout << std::endl;
-
-    hotfuzz::std_random_provider<float> p(23, 67, 0.9, 67.4);
-
-    while (true)
-    {
-        try
-        {
-            std::cout << p.iter() << " ";
-        }
-        catch(const hotfuzz::exhaustion_signal& e)
-        {
-            std::cout << e.what() << '\n';
-            break;
-        }
-    }
-
-    std::vector<int> v{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-    hotfuzz::iterable_provider<decltype(v)> p1(15, v);
-
-    while (true)
-    {
-        try
-        {
-            std::cout << p1.iter() << " ";
-        }
-        catch(const hotfuzz::exhaustion_signal& e)
-        {
-            std::cout << e.what() << '\n';
-            break;
-        }
-    }
-
-    p.reset(); p1.reset();
+    std::cout << "in-process zip\n";
 
     hotfuzz::fuzz(
-        [](float x, int y) -> float { return x + y; },
+        [](int x, int y)
+        {
+            std::cout << "value: " << (x + y) << '\n';
+        },
         hotfuzz::run_mode::zip,
-        p,
-        p1
+        x_provider,
+        y_provider,
+        false
     );
 
-    p.reset(); p1.reset();
+    x_provider.reset();
+    y_provider.reset();
+
+    std::cout << "\nisolated grid\n";
 
     hotfuzz::fuzz(
-        [](float x, int y) -> float { auto b = x + y; std::cout << b << std::endl; return b; },
+        [](int x, int y)
+        {
+            if (y == 3)
+                throw std::runtime_error("demo exception");
+
+            if (x < 0 && y == 5)
+                ::raise(SIGSEGV);
+        },
         hotfuzz::run_mode::grid,
-        p,
-        p1
+        x_provider,
+        y_provider,
+        true
     );
-    
+
     return 0;
 }

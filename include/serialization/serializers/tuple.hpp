@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "serialization/serialization.hpp"
+#include "serialization/api.hpp"
 
 namespace hotfuzz
 {
@@ -31,7 +31,7 @@ namespace hotfuzz
             std::apply(
                 [&bytes](const auto&... elements)
                 {
-                    (detail::write_value(bytes, elements), ...);
+                    (utils::write_value(bytes, elements), ...);
                 },
                 value
             );
@@ -41,15 +41,15 @@ namespace hotfuzz
 
         static std::tuple<Ts...> from_bytes(const std::vector<std::uint8_t>& bytes)
         {
-            byte_reader reader(bytes);
+            utils::byte_reader reader(bytes);
 
             auto result = []<std::size_t... I>(
-                byte_reader& current_reader,
+                utils::byte_reader& current_reader,
                 std::index_sequence<I...>
             ) -> std::tuple<Ts...>
             {
                 return std::tuple<Ts...>{
-                    detail::read_value<std::remove_cv_t<std::tuple_element_t<I, std::tuple<Ts...>>>>(current_reader)...
+                    utils::read_value<std::remove_cv_t<std::tuple_element_t<I, std::tuple<Ts...>>>>(current_reader)...
                 };
             }(reader, std::index_sequence_for<Ts...>{});
 

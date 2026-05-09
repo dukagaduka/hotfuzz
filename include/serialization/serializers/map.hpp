@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "serialization/serialization.hpp"
+#include "serialization/api.hpp"
 
 namespace hotfuzz
 {
@@ -30,12 +30,12 @@ namespace hotfuzz
         static std::vector<std::uint8_t> to_bytes(const map_type& value)
         {
             std::vector<std::uint8_t> bytes;
-            detail::write_value(bytes, value.size());
+            utils::write_value(bytes, value.size());
 
             for (const auto& [key, mapped] : value)
             {
-                detail::write_value(bytes, key);
-                detail::write_value(bytes, mapped);
+                utils::write_value(bytes, key);
+                utils::write_value(bytes, mapped);
             }
 
             return bytes;
@@ -46,15 +46,15 @@ namespace hotfuzz
             using key_type = std::remove_cv_t<Key>;
             using mapped_type = std::remove_cv_t<T>;
 
-            byte_reader reader(bytes);
-            const std::size_t size = detail::read_value<std::size_t>(reader);
+            utils::byte_reader reader(bytes);
+            const std::size_t size = utils::read_value<std::size_t>(reader);
 
             map_type result;
 
             for (std::size_t i = 0; i < size; ++i)
             {
-                auto key = detail::read_value<key_type>(reader);
-                auto mapped = detail::read_value<mapped_type>(reader);
+                auto key = utils::read_value<key_type>(reader);
+                auto mapped = utils::read_value<mapped_type>(reader);
                 result.emplace(std::move(key), std::move(mapped));
             }
 
