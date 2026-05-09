@@ -24,6 +24,22 @@ namespace hotfuzz
 
 
     /**
+     * @brief Lifecycle state for worker_pool scheduling.
+     *
+     * accepting allows submit(). finishing rejects new tasks but keeps pending
+     * and in-flight work alive so wait_one() can drain results. stopped is the
+     * immediate-shutdown state where pending/ready queues are discarded and
+     * child processes are stopped.
+     */
+    enum class pool_state : std::uint8_t
+    {
+        accepting,
+        finishing,
+        stopped
+    };
+
+
+    /**
      * @brief Bounded operation deadlines used by worker.
      *
      * send_timeout bounds request delivery, frame_timeout bounds reading a

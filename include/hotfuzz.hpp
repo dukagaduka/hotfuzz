@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "call_helpers.hpp"
+#include "utils.hpp"
 #include "data/base_provider.hpp"
 #include "serialization/specs.h"
 
@@ -117,7 +117,7 @@ namespace hotfuzz
             fuzz_grid_submit_impl(pool, provider_refs, storage);
         }
 
-        pool.close();
+        pool.stop();
     }
 
     /**

@@ -57,7 +57,7 @@ namespace hotfuzz
         /**
          * @brief Adds one task to the pending queue and returns its task id.
          *
-         * Throws std::runtime_error after close() or stop_now().
+         * Throws std::runtime_error after stop() or stop_immediately().
          */
         std::uint64_t submit(args_tuple args);
 
@@ -72,12 +72,12 @@ namespace hotfuzz
         /**
          * @brief Stops accepting new tasks but lets pending/in-flight tasks finish.
          */
-        void close() noexcept;
+        void stop() noexcept;
 
         /**
          * @brief Drops pending work and stops all child processes immediately.
          */
-        void stop_now() noexcept;
+        void stop_immediately() noexcept;
 
         /**
          * @brief Number of tasks accepted by submit().
@@ -85,7 +85,7 @@ namespace hotfuzz
         [[nodiscard]] std::size_t submitted() const noexcept;
 
         /**
-         * @brief Number of execution results returned to the ready/result path.
+         * @brief Number of execution results returned by wait_one().
          */
         [[nodiscard]] std::size_t finished() const noexcept;
 
@@ -110,12 +110,12 @@ namespace hotfuzz
         [[nodiscard]] bool accepting() const noexcept;
 
         /**
-         * @brief True after stop_now() or destructor shutdown started.
+         * @brief True after stop_immediately() or destructor shutdown started.
          */
         [[nodiscard]] bool stopped() const noexcept;
 
         /**
-         * @brief True only after close() and after all accepted work is consumed.
+         * @brief True only after stop() and after all accepted work is consumed.
          */
         [[nodiscard]] bool drained() const noexcept;
 
@@ -136,14 +136,9 @@ namespace hotfuzz
         };
 
         /**
-         * @brief Returns true if the pool still has pending, ready, or in-flight work.
+         * @brief Returns true if the pool still has pending or in-flight work.
          */
         [[nodiscard]] bool has_work() const noexcept;
-
-        /**
-         * @brief Removes and returns the next already completed result, if any.
-         */
-        [[nodiscard]] std::optional<result_type> pop_ready();
 
         /**
          * @brief Checks in-flight task deadlines and returns a timeout result, if one expired.
@@ -172,22 +167,10 @@ namespace hotfuzz
         /**
          * @brief Moves pending tasks into currently idle workers.
          *
-         * Successful send() makes the task in-flight. Failed send() remains a
-         * delivery failure and goes through handle_send_failure().
+         * Successful send() makes the task in-flight. Failed send() is still
+         * dispatch policy because user code has not executed yet.
          */
-        void dispatch_idle_workers();
-
-        /**
-         * @brief Applies pool dispatch retry policy after worker.send() failed.
-         *
-         * If retries remain, the task is returned to pending. If not, this
-         * throws dispatch_error. It never creates isolated_result.
-         */
-        void handle_send_failure(
-            std::size_t worker_index,
-            task item,
-            const worker_send_result& send_result
-        );
+        void dispatch_pending_tasks();
 
         /**
          * @brief Builds and throws a detailed dispatch_error.
@@ -197,11 +180,6 @@ namespace hotfuzz
             std::size_t worker_index,
             const worker_send_result& send_result
         ) const;
-
-        /**
-         * @brief Queues a completed execution result and advances finished count.
-         */
-        void finish_result(result_type result);
 
         /**
          * @brief Restarts a worker slot when the owned worker stopped or became broken.
@@ -223,26 +201,21 @@ namespace hotfuzz
          */
         static void clear_pending(std::queue<task>& queue) noexcept;
 
-        /**
-         * @brief Drops all already completed but unconsumed results during immediate shutdown.
-         */
-        static void clear_ready(std::queue<result_type>& queue) noexcept;
-
     private:
         F& m_fn;
         worker_pool_options m_options;
 
         std::deque<worker_type> m_workers;
         std::queue<task> m_pending;
-        std::queue<result_type> m_ready;
 
         std::uint64_t m_next_task_id { 1 };
         std::size_t m_submitted {};
         std::size_t m_finished {};
 
-        bool m_accepting { true };
-        bool m_stopped { false };
+        pool_state m_state { pool_state::accepting };
+
     };
+
 
     template <typename F, typename... Ts>
     worker_pool<F, Ts...>::worker_pool(F& fn, worker_pool_options options)
@@ -255,9 +228,11 @@ namespace hotfuzz
         if (m_options.max_dispatch_attempts == 0)
             m_options.max_dispatch_attempts = 1;
 
-        // std::deque stores non-movable worker process handles without moving
-        // existing elements. The count is still fixed: we emplace exactly once
-        // here and never grow/shrink m_workers afterwards.
+        // worker owns a pid/fd pair and is intentionally non-copyable/non-movable.
+        // std::deque lets us emplace these worker slots without relocating existing
+        // elements as the container grows. The pool size is still fixed: all slots are
+        // created here once, and later respawn() only replaces child processes inside
+        // the same slots.
         for (std::size_t i = 0; i < m_options.worker_count; ++i)
             m_workers.emplace_back(m_fn, m_options.timeouts);
 
@@ -265,17 +240,19 @@ namespace hotfuzz
             spawn_worker_or_throw(i);
     }
 
+
     template <typename F, typename... Ts>
     worker_pool<F, Ts...>::~worker_pool()
     {
-        stop_now();
+        stop_immediately();
     }
+
 
     template <typename F, typename... Ts>
     std::uint64_t worker_pool<F, Ts...>::submit(args_tuple args)
     {
-        if (!m_accepting || m_stopped)
-            throw std::runtime_error("cannot submit task to a closed worker_pool");
+        if (m_state != pool_state::accepting)
+            throw std::runtime_error("cannot submit task to a non-accepting worker_pool");
 
         task item {};
         item.id = m_next_task_id++;
@@ -284,26 +261,24 @@ namespace hotfuzz
         m_pending.push(std::move(item));
         ++m_submitted;
 
-        dispatch_idle_workers();
+        dispatch_pending_tasks();
 
         return m_next_task_id - 1;
     }
+
 
     template <typename F, typename... Ts>
     typename worker_pool<F, Ts...>::result_type worker_pool<F, Ts...>::wait_one()
     {
         while (true)
         {
-            if (m_stopped)
+            if (m_state == pool_state::stopped)
                 throw std::runtime_error("wait_one() called on a stopped worker_pool");
 
             // Always try dispatch first: a previous result/timeout may have
             // freed a worker, and pending work should move to child processes
             // before the pool starts waiting on fds.
-            dispatch_idle_workers();
-
-            if (auto ready = pop_ready())
-                return *ready;
+            dispatch_pending_tasks();
 
             // Task timeout is not tied to fd readiness. A stuck target may
             // never make the socket readable, so deadlines are checked before
@@ -313,7 +288,7 @@ namespace hotfuzz
 
             if (!has_work())
             {
-                if (!m_accepting)
+                if (m_state == pool_state::finishing)
                     throw std::runtime_error("wait_one() called on a drained worker_pool");
 
                 std::this_thread::sleep_for(m_options.poll_timeout);
@@ -355,24 +330,26 @@ namespace hotfuzz
         }
     }
 
+
     template <typename F, typename... Ts>
-    void worker_pool<F, Ts...>::close() noexcept
+    void worker_pool<F, Ts...>::stop() noexcept
     {
-        m_accepting = false;
+        if (m_state != pool_state::stopped)
+            m_state = pool_state::finishing;
     }
 
+
     template <typename F, typename... Ts>
-    void worker_pool<F, Ts...>::stop_now() noexcept
+    void worker_pool<F, Ts...>::stop_immediately() noexcept
     {
-        m_accepting = false;
-        m_stopped = true;
+        m_state = pool_state::stopped;
 
         clear_pending(m_pending);
-        clear_ready(m_ready);
 
         for (auto& item : m_workers)
             item.stop();
     }
+
 
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::submitted() const noexcept
@@ -380,17 +357,20 @@ namespace hotfuzz
         return m_submitted;
     }
 
+
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::finished() const noexcept
     {
         return m_finished;
     }
 
+
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::pending() const noexcept
     {
         return m_pending.size();
     }
+
 
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::inflight() const noexcept
@@ -406,46 +386,41 @@ namespace hotfuzz
         return count;
     }
 
+
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::worker_count() const noexcept
     {
         return m_workers.size();
     }
 
+
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::accepting() const noexcept
     {
-        return m_accepting;
+        return m_state == pool_state::accepting;
     }
+
 
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::stopped() const noexcept
     {
-        return m_stopped;
+        return m_state == pool_state::stopped;
     }
+
 
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::drained() const noexcept
     {
-        return !m_accepting && !has_work();
+        return m_state == pool_state::finishing && !has_work();
     }
+
 
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::has_work() const noexcept
     {
-        return !m_pending.empty() || !m_ready.empty() || inflight() != 0;
+        return !m_pending.empty() || inflight() != 0;
     }
 
-    template <typename F, typename... Ts>
-    std::optional<typename worker_pool<F, Ts...>::result_type> worker_pool<F, Ts...>::pop_ready()
-    {
-        if (m_ready.empty())
-            return std::nullopt;
-
-        auto result = std::move(m_ready.front());
-        m_ready.pop();
-        return result;
-    }
 
     template <typename F, typename... Ts>
     std::optional<typename worker_pool<F, Ts...>::result_type> worker_pool<F, Ts...>::collect_expired_task()
@@ -460,14 +435,15 @@ namespace hotfuzz
                 continue;
 
             result->worker_index = i;
-            finish_result(std::move(*result));
+            ++m_finished;
             respawn_if_needed(i);
 
-            return pop_ready();
+            return result;
         }
 
         return std::nullopt;
     }
+
 
     template <typename F, typename... Ts>
     std::optional<typename worker_pool<F, Ts...>::result_type> worker_pool<F, Ts...>::collect_worker_event(
@@ -484,11 +460,12 @@ namespace hotfuzz
 
         auto result = m_workers[*worker_index].receive();
         result.worker_index = *worker_index;
-        finish_result(std::move(result));
+        ++m_finished;
         respawn_if_needed(*worker_index);
 
-        return pop_ready();
+        return result;
     }
+
 
     template <typename F, typename... Ts>
     void worker_pool<F, Ts...>::spawn_worker_or_throw(std::size_t worker_index)
@@ -513,8 +490,9 @@ namespace hotfuzz
         );
     }
 
+
     template <typename F, typename... Ts>
-    void worker_pool<F, Ts...>::dispatch_idle_workers()
+    void worker_pool<F, Ts...>::dispatch_pending_tasks()
     {
         if (m_pending.empty())
             return;
@@ -532,7 +510,7 @@ namespace hotfuzz
             if (!current_worker.alive())
                 spawn_worker_or_throw(i);
 
-            if (!current_worker.idle())
+            if (current_worker.busy())
                 continue;
 
             task item = std::move(m_pending.front());
@@ -546,35 +524,26 @@ namespace hotfuzz
             if (send_result.accepted())
                 continue;
 
-            handle_send_failure(i, std::move(item), send_result);
+            ++item.dispatch_attempts;
+
+            // The task was not accepted by a worker, so this is still dispatch
+            // policy. Execution retry is intentionally not mixed into this branch.
+            if (send_result.worker_is_poisoned())
+                respawn_if_needed(i);
+
+            if (
+                send_result.status != worker_send_status::serialize_error &&
+                item.dispatch_attempts < m_options.max_dispatch_attempts
+            )
+            {
+                m_pending.push(std::move(item));
+                continue;
+            }
+
+            throw_dispatch_failure(item, i, send_result);
         }
     }
 
-    template <typename F, typename... Ts>
-    void worker_pool<F, Ts...>::handle_send_failure(
-        std::size_t worker_index,
-        task item,
-        const worker_send_result& send_result
-    )
-    {
-        ++item.dispatch_attempts;
-
-        // The task was not accepted by a worker, so this is still dispatch
-        // policy. Execution retry is intentionally not mixed into this branch.
-        if (send_result.worker_is_poisoned())
-            respawn_if_needed(worker_index);
-
-        if (
-            send_result.status != worker_send_status::serialize_error &&
-            item.dispatch_attempts < m_options.max_dispatch_attempts
-        )
-        {
-            m_pending.push(std::move(item));
-            return;
-        }
-
-        throw_dispatch_failure(item, worker_index, send_result);
-    }
 
     template <typename F, typename... Ts>
     void worker_pool<F, Ts...>::throw_dispatch_failure(
@@ -598,12 +567,6 @@ namespace hotfuzz
         throw dispatch_error(message);
     }
 
-    template <typename F, typename... Ts>
-    void worker_pool<F, Ts...>::finish_result(result_type result)
-    {
-        m_ready.push(std::move(result));
-        ++m_finished;
-    }
 
     template <typename F, typename... Ts>
     void worker_pool<F, Ts...>::respawn_if_needed(std::size_t worker_index)
@@ -615,6 +578,7 @@ namespace hotfuzz
 
         spawn_worker_or_throw(worker_index);
     }
+
 
     template <typename F, typename... Ts>
     std::vector<pollfd> worker_pool<F, Ts...>::pollable_fds() const
@@ -637,6 +601,7 @@ namespace hotfuzz
         return fds;
     }
 
+
     template <typename F, typename... Ts>
     std::optional<std::size_t> worker_pool<F, Ts...>::find_worker_by_fd(int fd) const noexcept
     {
@@ -649,17 +614,11 @@ namespace hotfuzz
         return std::nullopt;
     }
 
+
     template <typename F, typename... Ts>
     void worker_pool<F, Ts...>::clear_pending(std::queue<task>& queue) noexcept
     {
         std::queue<task> empty;
-        queue.swap(empty);
-    }
-
-    template <typename F, typename... Ts>
-    void worker_pool<F, Ts...>::clear_ready(std::queue<result_type>& queue) noexcept
-    {
-        std::queue<result_type> empty;
         queue.swap(empty);
     }
 }
