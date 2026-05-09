@@ -222,11 +222,16 @@ namespace hotfuzz
 
         if (timeout != std::chrono::milliseconds::zero())
         {
-            result = read_all_for(m_read_fd, &header, sizeof(header), utils::timeout_ms_until_chrono(deadline));
+            result = utils::read_all_for(
+                m_read_fd,
+                &header,
+                sizeof(header),
+                utils::timeout_ms_until_chrono(deadline)
+            );
         }
         else
         {
-            result = read_all(m_read_fd, &header, sizeof(header));
+            result = utils::read_all(m_read_fd, &header, sizeof(header));
         }
 
         if (!result.ok())
@@ -240,11 +245,16 @@ namespace hotfuzz
         {
             if (timeout != std::chrono::milliseconds::zero())
             {
-                result = read_all_for(m_read_fd, payload_bytes.data(), payload_bytes.size(), utils::timeout_ms_until_chrono(deadline));
+                result = utils::read_all_for(
+                    m_read_fd,
+                    payload_bytes.data(),
+                    payload_bytes.size(),
+                    utils::timeout_ms_until_chrono(deadline)
+                );
             }
             else
             {
-                result = read_all(m_read_fd, payload_bytes.data(), payload_bytes.size());
+                result = utils::read_all(m_read_fd, payload_bytes.data(), payload_bytes.size());
             }
 
             if (!result.ok())
@@ -271,11 +281,16 @@ namespace hotfuzz
 
         if (timeout != std::chrono::milliseconds::zero())
         {
-            result = write_all_for(m_write_fd, &header, sizeof(header), utils::timeout_ms_until_chrono(deadline));
+            result = utils::write_all_for(
+                m_write_fd,
+                &header,
+                sizeof(header),
+                utils::timeout_ms_until_chrono(deadline)
+            );
         }
         else
         {
-            result = write_all(m_write_fd, &header, sizeof(header));
+            result = utils::write_all(m_write_fd, &header, sizeof(header));
         }
 
         if (!result.ok())
@@ -285,11 +300,16 @@ namespace hotfuzz
         {
             if (timeout != std::chrono::milliseconds::zero())
             {
-                result = write_all_for(m_write_fd, payload.data(), payload.size(), utils::timeout_ms_until_chrono(deadline));
+                result = utils::write_all_for(
+                    m_write_fd,
+                    payload.data(),
+                    payload.size(),
+                    utils::timeout_ms_until_chrono(deadline)
+                );
             }
             else
             {
-                result = write_all(m_write_fd, payload.data(), payload.size());
+                result = utils::write_all(m_write_fd, payload.data(), payload.size());
             }
 
             if (!result.ok())
