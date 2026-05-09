@@ -51,6 +51,8 @@ namespace hotfuzz
         worker(const worker&) = delete;
         worker& operator=(const worker&) = delete;
 
+        // Lifecycle and task API.
+
         /**
          * @brief Starts the child process and moves the worker to idle.
          *
@@ -100,6 +102,8 @@ namespace hotfuzz
             std::chrono::steady_clock::time_point now
         );
 
+        // State accessors.
+
         /**
          * @brief Returns true while a child process/fd is owned by this worker.
          */
@@ -148,31 +152,86 @@ namespace hotfuzz
             std::optional<std::chrono::steady_clock::time_point> deadline;
         };
 
+        // Child-side execution.
+
+        /**
+         * @brief Runs the child-side request loop until stop, crash, or protocol failure.
+         *
+         * This method never returns to forked caller code. It exits the child
+         * with worker_exit_* codes so the parent can classify infrastructure
+         * failures separately from target crashes.
+         */
         [[noreturn]] void child_loop(int fd);
 
-        [[nodiscard]] result_type make_result(
+        // Result builders.
+
+        /**
+         * @brief Creates a result from the parent-side snapshot of an accepted task.
+         *
+         * The stored args are copied back into the result because failures often
+         * happen after the protocol stream or child process can no longer be
+         * trusted as a source of task data.
+         */
+        [[nodiscard]] result_type make_task_result(
             const current_task& task,
             isolated_status status,
             std::string message = {}
         ) const;
 
-        [[nodiscard]] result_type make_exit_result(
+        /**
+         * @brief Converts a waitpid() status into the closest isolated_result.
+         *
+         * Signal termination is reported as target crash. Normal worker exit
+         * codes are treated as worker/protocol/IPC infrastructure outcomes.
+         * fallback_* is used when the wait status has no more specific meaning.
+         */
+        [[nodiscard]] result_type make_result_from_wait_status(
             const current_task& task,
             int wait_status,
             isolated_status fallback_status,
             std::string fallback_message
         ) const;
 
-        [[nodiscard]] std::optional<result_type> child_exit_result(
+        // Result collectors and finishers.
+
+        /**
+         * @brief Non-blockingly checks whether the child exited during current task.
+         *
+         * Returns nullopt while the child is still alive or if no child is owned.
+         * A reaped child pid is cleared immediately to prevent a second wait.
+         */
+        [[nodiscard]] std::optional<result_type> try_collect_child_exit_result(
             const current_task& task,
             isolated_status fallback_status,
             std::string fallback_message
         );
 
-        [[nodiscard]] result_type result_from_packet(const packet<Ts...>& response);
+        /**
+         * @brief Validates and converts one response packet for the in-flight task.
+         *
+         * Reusable success/exception responses move the worker back to idle.
+         * Protocol violations poison the worker and force child shutdown.
+         */
+        [[nodiscard]] result_type finish_task_from_response_packet(const packet<Ts...>& response);
 
+        // Resource cleanup.
+
+        /**
+         * @brief Tears down the owned child process and returns parent state to stopped.
+         *
+         * Idle workers get a graceful stop packet. Busy or broken workers skip
+         * graceful shutdown because the protocol stream may already be unsafe.
+         */
         void shutdown_child() noexcept;
+
+        /**
+         * @brief Closes parent-side socket descriptor if it is currently open.
+         */
         void close_fd() noexcept;
+
+        /**
+         * @brief Clears pid, fd, current task, and lifecycle state after shutdown.
+         */
         void reset_parent_state() noexcept;
 
     private:
@@ -213,6 +272,8 @@ namespace hotfuzz
         if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
             return false;
 
+        // The socketpair is created before fork so each side can close the end
+        // it does not own and keep a single bidirectional control channel.
         pid_t child_pid = ::fork();
 
         if (child_pid < 0)
@@ -228,6 +289,7 @@ namespace hotfuzz
             child_loop(sv[1]);
         }
 
+        // Parent owns only sv[0]; child_loop owns sv[1] and exits by _exit().
         ::close(sv[1]);
 
         m_pid = child_pid;
@@ -364,9 +426,11 @@ namespace hotfuzz
         if (auto expired_result = expire_if_timed_out(std::chrono::steady_clock::now()))
             return *expired_result;
 
+        // Keep a stable task snapshot because error handling may reset
+        // m_current_task while building the result returned to the pool.
         const auto task = *m_current_task;
 
-        if (auto exited_result = child_exit_result(
+        if (auto exited_result = try_collect_child_exit_result(
                 task,
                 isolated_status::ipc_error,
                 "worker exited before sending response"
@@ -383,21 +447,27 @@ namespace hotfuzz
             packet_manager<Ts...> packets(m_fd);
             auto response = packets.receive(m_timeouts.frame_timeout);
 
-            return result_from_packet(response);
+            // finish_task_from_response_packet is the only success path that
+            // can make this worker reusable; receive-side failures shut it down.
+            return finish_task_from_response_packet(response);
         }
         catch (const timeout_error& e)
         {
             // frame_timeout means we failed to read an already expected
             // response frame; task_timeout is handled by expire_if_timed_out().
             m_state = worker_state::broken;
-            auto result = make_result(task, isolated_status::ipc_error, e.what());
+            auto result = make_task_result(task, isolated_status::ipc_error, e.what());
             shutdown_child();
 
             return result;
         }
         catch (const disconnected_error& e)
         {
-            if (auto exited = child_exit_result(task, isolated_status::ipc_error, e.what()))
+            if (auto exited = try_collect_child_exit_result(
+                    task,
+                    isolated_status::ipc_error,
+                    e.what()
+                ))
             {
                 m_state = worker_state::broken;
                 shutdown_child();
@@ -406,14 +476,18 @@ namespace hotfuzz
             }
 
             m_state = worker_state::broken;
-            auto result = make_result(task, isolated_status::ipc_error, e.what());
+            auto result = make_task_result(task, isolated_status::ipc_error, e.what());
             shutdown_child();
 
             return result;
         }
         catch (const ipc_error& e)
         {
-            if (auto exited = child_exit_result(task, isolated_status::ipc_error, e.what()))
+            if (auto exited = try_collect_child_exit_result(
+                    task,
+                    isolated_status::ipc_error,
+                    e.what()
+                ))
             {
                 m_state = worker_state::broken;
                 shutdown_child();
@@ -422,14 +496,18 @@ namespace hotfuzz
             }
 
             m_state = worker_state::broken;
-            auto result = make_result(task, isolated_status::ipc_error, e.what());
+            auto result = make_task_result(task, isolated_status::ipc_error, e.what());
             shutdown_child();
 
             return result;
         }
         catch (const protocol_error& e)
         {
-            if (auto exited = child_exit_result(task, isolated_status::protocol_error, e.what()))
+            if (auto exited = try_collect_child_exit_result(
+                    task,
+                    isolated_status::protocol_error,
+                    e.what()
+                ))
             {
                 m_state = worker_state::broken;
                 shutdown_child();
@@ -438,7 +516,7 @@ namespace hotfuzz
             }
 
             m_state = worker_state::broken;
-            auto result = make_result(task, isolated_status::protocol_error, e.what());
+            auto result = make_task_result(task, isolated_status::protocol_error, e.what());
             shutdown_child();
 
             return result;
@@ -446,7 +524,7 @@ namespace hotfuzz
         catch (const std::exception& e)
         {
             m_state = worker_state::broken;
-            auto result = make_result(task, isolated_status::internal_error, e.what());
+            auto result = make_task_result(task, isolated_status::internal_error, e.what());
             shutdown_child();
 
             return result;
@@ -454,7 +532,11 @@ namespace hotfuzz
         catch (...)
         {
             m_state = worker_state::broken;
-            auto result = make_result(task, isolated_status::internal_error, "unknown worker receive failure");
+            auto result = make_task_result(
+                task,
+                isolated_status::internal_error,
+                "unknown worker receive failure"
+            );
             shutdown_child();
 
             return result;
@@ -476,7 +558,7 @@ namespace hotfuzz
             return std::nullopt;
 
         m_state = worker_state::broken;
-        auto result = make_result(task, isolated_status::timeout, "worker task timed out");
+        auto result = make_task_result(task, isolated_status::timeout, "worker task timed out");
         shutdown_child();
 
         return result;
@@ -584,6 +666,8 @@ namespace hotfuzz
 
             try
             {
+                // User code runs only in the child. Exceptions are converted
+                // to protocol responses; fatal signals are observed by parent.
                 call_with_tuple(m_fn, request.as_tuple());
 
                 try
@@ -600,6 +684,8 @@ namespace hotfuzz
             {
                 try
                 {
+                    // A target exception is a valid task result, not a worker
+                    // failure, as long as the child can still send the frame.
                     packets.send_exception(request.task_id(), e.what(), m_timeouts.send_timeout);
                 }
                 catch (...)
@@ -629,7 +715,7 @@ namespace hotfuzz
 
 
     template <typename F, typename... Ts>
-    inline typename worker<F, Ts...>::result_type worker<F, Ts...>::make_result(
+    inline typename worker<F, Ts...>::result_type worker<F, Ts...>::make_task_result(
         const current_task& task,
         isolated_status status,
         std::string message
@@ -642,10 +728,10 @@ namespace hotfuzz
         result.args = task.args;
         return result;
     }
-    
+
 
     template <typename F, typename... Ts>
-    inline typename worker<F, Ts...>::result_type worker<F, Ts...>::make_exit_result(
+    inline typename worker<F, Ts...>::result_type worker<F, Ts...>::make_result_from_wait_status(
         const current_task& task,
         int wait_status,
         isolated_status fallback_status,
@@ -655,7 +741,7 @@ namespace hotfuzz
         if (WIFSIGNALED(wait_status))
         {
             const int sig = WTERMSIG(wait_status);
-            auto result = make_result(
+            auto result = make_task_result(
                 task,
                 isolated_status::crash,
                 "worker crashed with " + signal_name(sig)
@@ -670,6 +756,8 @@ namespace hotfuzz
             isolated_status status = fallback_status;
             std::string message = std::move(fallback_message);
 
+            // Child exit codes are reserved for worker infrastructure. A clean
+            // exit while a task is in flight still means the response is lost.
             switch (code)
             {
                 case worker_exit_ok:
@@ -698,17 +786,17 @@ namespace hotfuzz
                     break;
             }
 
-            auto result = make_result(task, status, std::move(message));
+            auto result = make_task_result(task, status, std::move(message));
             result.exit_code = code;
             return result;
         }
 
-        return make_result(task, fallback_status, std::move(fallback_message));
+        return make_task_result(task, fallback_status, std::move(fallback_message));
     }
 
 
     template <typename F, typename... Ts>
-    inline std::optional<typename worker<F, Ts...>::result_type> worker<F, Ts...>::child_exit_result(
+    inline std::optional<typename worker<F, Ts...>::result_type> worker<F, Ts...>::try_collect_child_exit_result(
         const current_task& task,
         isolated_status fallback_status,
         std::string fallback_message
@@ -725,8 +813,15 @@ namespace hotfuzz
 
         if (rc == m_pid)
         {
+            // waitpid consumed the child status; clear m_pid so shutdown_child()
+            // will only close local resources and reset parent-side state.
             m_pid = -1;
-            return make_exit_result(task, status, fallback_status, std::move(fallback_message));
+            return make_result_from_wait_status(
+                task,
+                status,
+                fallback_status,
+                std::move(fallback_message)
+            );
         }
 
         return std::nullopt;
@@ -734,7 +829,7 @@ namespace hotfuzz
 
 
     template <typename F, typename... Ts>
-    inline typename worker<F, Ts...>::result_type worker<F, Ts...>::result_from_packet(
+    inline typename worker<F, Ts...>::result_type worker<F, Ts...>::finish_task_from_response_packet(
         const packet<Ts...>& response
     )
     {
@@ -745,8 +840,11 @@ namespace hotfuzz
 
         if (response.task_id() != task.task_id)
         {
+            // Mismatched ids mean parent and child disagree about stream
+            // ordering, so keeping the child would risk attributing results to
+            // the wrong task.
             m_state = worker_state::broken;
-            auto result = make_result(
+            auto result = make_task_result(
                 task,
                 isolated_status::protocol_error,
                 "worker response task_id mismatch"
@@ -761,7 +859,7 @@ namespace hotfuzz
             m_current_task.reset();
             m_state = worker_state::idle;
 
-            return make_result(task, isolated_status::ok);
+            return make_task_result(task, isolated_status::ok);
         }
 
         if (response.kind() == packet_kind::exception)
@@ -769,20 +867,26 @@ namespace hotfuzz
             m_current_task.reset();
             m_state = worker_state::idle;
 
-            return make_result(task, isolated_status::exception, response.as_text());
+            return make_task_result(task, isolated_status::exception, response.as_text());
         }
 
         if (response.kind() == packet_kind::protocol_error)
         {
+            // The child explicitly reports protocol corruption. Preserve its
+            // message, then tear down the channel before accepting more work.
             m_state = worker_state::broken;
-            auto result = make_result(task, isolated_status::protocol_error, response.as_text());
+            auto result = make_task_result(
+                task,
+                isolated_status::protocol_error,
+                response.as_text()
+            );
             shutdown_child();
 
             return result;
         }
 
         m_state = worker_state::broken;
-        auto result = make_result(
+        auto result = make_task_result(
             task,
             isolated_status::protocol_error,
             "worker returned unexpected packet kind"
@@ -834,6 +938,8 @@ namespace hotfuzz
 
         if (m_pid > 0)
         {
+            // After the fd is closed there is no protocol left to preserve.
+            // SIGKILL is the final cleanup path for busy, broken, or wedged children.
             ::kill(m_pid, SIGKILL);
 
             int status {};
