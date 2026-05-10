@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <chrono>
 #include <concepts>
+#include <exception>
 #include <functional>
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -27,7 +29,6 @@
 #define NIX(exp) exp
 
 #include "worker/worker_pool.hpp"
-#include "worker/specs.h"
 
 #endif
 
@@ -102,22 +103,60 @@ namespace hotfuzz
             }
         );
 
-        if constexpr (sizeof...(Ts) == 0)
+        std::exception_ptr consumer_exception;
+        std::thread consumer(
+            [&pool, &consumer_exception]
+            {
+                try
+                {
+                    while (true)
+                        (void)pool.wait_one();
+                }
+                catch (const std::runtime_error&)
+                {
+                    if (!pool.drained())
+                        consumer_exception = std::current_exception();
+                }
+                catch (...)
+                {
+                    consumer_exception = std::current_exception();
+                }
+            }
+        );
+
+        try
         {
-            (void)pool.submit(std::tuple<>{});
+            if constexpr (sizeof...(Ts) == 0)
+            {
+                (void)pool.submit(std::tuple<>{});
+            }
+            else if (mode == run_mode::zip)
+            {
+                fuzz_zip_submit(pool, providers...);
+            }
+            else
+            {
+                auto provider_refs = std::forward_as_tuple(providers...);
+                auto storage = std::tuple<std::optional<Ts>...>{};
+                fuzz_grid_submit_impl(pool, provider_refs, storage);
+            }
+
+            pool.stop();
         }
-        else if (mode == run_mode::zip)
+        catch (...)
         {
-            fuzz_zip_submit(pool, providers...);
-        }
-        else
-        {
-            auto provider_refs = std::forward_as_tuple(providers...);
-            auto storage = std::tuple<std::optional<Ts>...>{};
-            fuzz_grid_submit_impl(pool, provider_refs, storage);
+            pool.stop_immediately();
+            consumer.join();
+            throw;
         }
 
-        pool.stop();
+        consumer.join();
+
+        if (consumer_exception)
+        {
+            pool.stop_immediately();
+            std::rethrow_exception(consumer_exception);
+        }
     }
 
     /**

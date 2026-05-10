@@ -3,11 +3,14 @@
 
 #ifndef _WIN32
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <deque>
+#include <mutex>
 #include <optional>
 #include <poll.h>
 #include <queue>
@@ -20,6 +23,7 @@
 
 #include "worker/worker.hpp"
 #include "worker/specs.h"
+#include "worker/utils.hpp"
 
 namespace hotfuzz
 {
@@ -29,6 +33,8 @@ namespace hotfuzz
      * The pool owns task queues, dispatch retry policy, poll(), and worker
      * respawn. It does not reinterpret execution results: accepted tasks return
      * isolated_result, while delivery failure after retries throws dispatch_error.
+     * submit(), wait_one(), stop(), stop_immediately(), and state accessors are
+     * synchronized for producer/consumer use from different threads.
      */
     template <typename F, typename... Ts>
     class worker_pool
@@ -137,6 +143,8 @@ namespace hotfuzz
 
         /**
          * @brief Returns true if the pool still has pending or in-flight work.
+         *
+         * @pre m_pending_mutex and m_workers_mutex are held by the caller.
          */
         [[nodiscard]] bool has_work() const noexcept;
 
@@ -145,6 +153,8 @@ namespace hotfuzz
          *
          * Timeout detection is separate from poll(), because a hung target may
          * never make its fd readable.
+         *
+         * @pre m_workers_mutex is held by the caller.
          */
         [[nodiscard]] std::optional<result_type> collect_expired_task();
 
@@ -153,6 +163,8 @@ namespace hotfuzz
          *
          * The worker owns crash/protocol/ipc classification. The pool only adds
          * worker_index, queues the result, and respawns the worker if needed.
+         *
+         * @pre m_workers_mutex is held by the caller.
          */
         [[nodiscard]] std::optional<result_type> collect_worker_event(const pollfd& pfd);
 
@@ -161,6 +173,8 @@ namespace hotfuzz
          *
          * Spawn failure is infrastructure failure. The pool should not silently
          * continue with a smaller worker set than requested.
+         *
+         * @pre m_workers_mutex is held by the caller.
          */
         void spawn_worker_or_throw(std::size_t worker_index);
 
@@ -169,6 +183,8 @@ namespace hotfuzz
          *
          * Successful send() makes the task in-flight. Failed send() is still
          * dispatch policy because user code has not executed yet.
+         *
+         * @pre m_pending_mutex and m_workers_mutex are held by the caller.
          */
         void dispatch_pending_tasks();
 
@@ -183,16 +199,22 @@ namespace hotfuzz
 
         /**
          * @brief Restarts a worker slot when the owned worker stopped or became broken.
+         *
+         * @pre m_workers_mutex is held by the caller.
          */
         void respawn_if_needed(std::size_t worker_index);
 
         /**
          * @brief Builds pollfd list for workers that currently wait for a response.
+         *
+         * @pre m_workers_mutex is held by the caller.
          */
         [[nodiscard]] std::vector<pollfd> pollable_fds() const;
 
         /**
          * @brief Resolves a pollfd descriptor back to its fixed worker slot.
+         *
+         * @pre m_workers_mutex is held by the caller.
          */
         [[nodiscard]] std::optional<std::size_t> find_worker_by_fd(int fd) const noexcept;
 
@@ -212,7 +234,11 @@ namespace hotfuzz
         std::size_t m_submitted {};
         std::size_t m_finished {};
 
-        pool_state m_state { pool_state::accepting };
+        std::atomic<pool_state> m_state { pool_state::accepting };
+
+        mutable std::mutex m_pending_mutex;
+        mutable std::mutex m_workers_mutex;
+        std::condition_variable m_pending_cv;
 
     };
 
@@ -236,8 +262,12 @@ namespace hotfuzz
         for (std::size_t i = 0; i < m_options.worker_count; ++i)
             m_workers.emplace_back(m_fn, m_options.timeouts);
 
-        for (std::size_t i = 0; i < m_workers.size(); ++i)
-            spawn_worker_or_throw(i);
+        {
+            std::lock_guard lock(m_workers_mutex);
+
+            for (std::size_t i = 0; i < m_workers.size(); ++i)
+                spawn_worker_or_throw(i);
+        }
     }
 
 
@@ -251,19 +281,27 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     std::uint64_t worker_pool<F, Ts...>::submit(args_tuple args)
     {
-        if (m_state != pool_state::accepting)
-            throw std::runtime_error("cannot submit task to a non-accepting worker_pool");
+        std::uint64_t task_id {};
 
-        task item {};
-        item.id = m_next_task_id++;
-        item.args = std::move(args);
+        {
+            std::lock_guard lock(m_pending_mutex);
 
-        m_pending.push(std::move(item));
-        ++m_submitted;
+            if (m_state.load() != pool_state::accepting)
+                throw std::runtime_error("cannot submit task to a non-accepting worker_pool");
 
-        dispatch_pending_tasks();
+            task item {};
+            item.id = m_next_task_id++;
+            item.args = std::move(args);
 
-        return m_next_task_id - 1;
+            task_id = item.id;
+
+            m_pending.push(std::move(item));
+            ++m_submitted;
+        }
+
+        m_pending_cv.notify_one();
+
+        return task_id;
     }
 
 
@@ -272,60 +310,104 @@ namespace hotfuzz
     {
         while (true)
         {
-            if (m_state == pool_state::stopped)
+            if (m_state.load() == pool_state::stopped)
                 throw std::runtime_error("wait_one() called on a stopped worker_pool");
 
-            // Always try dispatch first: a previous result/timeout may have
-            // freed a worker, and pending work should move to child processes
-            // before the pool starts waiting on fds.
-            dispatch_pending_tasks();
-
-            // Task timeout is not tied to fd readiness. A stuck target may
-            // never make the socket readable, so deadlines are checked before
-            // poll() every loop iteration.
-            if (auto timeout = collect_expired_task())
-                return *timeout;
-
-            if (!has_work())
             {
-                if (m_state == pool_state::finishing)
+                // Always try dispatch first: a previous result/timeout may have
+                // freed a worker, and pending work should move to child processes
+                // before the pool starts waiting on fds.
+                std::scoped_lock lock(m_pending_mutex, m_workers_mutex);
+
+                if (m_state.load() == pool_state::stopped)
+                    throw std::runtime_error("wait_one() called on a stopped worker_pool");
+
+                dispatch_pending_tasks();
+            }
+
+            {
+                std::unique_lock lock(m_workers_mutex);
+
+                if (m_state.load() == pool_state::stopped)
+                    throw std::runtime_error("wait_one() called on a stopped worker_pool");
+
+                // Task timeout is not tied to fd readiness. A stuck target may
+                // never make the socket readable, so deadlines are checked before
+                // poll() every loop iteration.
+                if (auto timeout = collect_expired_task())
+                    return *timeout;
+            }
+
+            bool has_any_work {};
+
+            {
+                std::scoped_lock lock(m_pending_mutex, m_workers_mutex);
+                has_any_work = has_work();
+
+                if (!has_any_work && m_state.load() == pool_state::finishing)
                     throw std::runtime_error("wait_one() called on a drained worker_pool");
+            }
 
-                std::this_thread::sleep_for(m_options.poll_timeout);
+            if (!has_any_work)
+            {
+                std::unique_lock lock(m_pending_mutex);
+
+                m_pending_cv.wait(
+                    lock,
+                    [this]
+                    {
+                        return !m_pending.empty() ||
+                               m_state.load() != pool_state::accepting;
+                    }
+                );
+
                 continue;
             }
 
-            auto fds = pollable_fds();
-
-            if (fds.empty())
             {
-                // This can happen while workers are being respawned or while
-                // the pool is open but currently idle. The pool remains usable:
-                // future submit() calls may add more work.
-                std::this_thread::sleep_for(m_options.poll_timeout);
-                continue;
-            }
+                std::unique_lock lock(m_workers_mutex);
 
-            const int rc = ::poll(fds.data(), fds.size(), static_cast<int>(m_options.poll_timeout.count()));
+                if (m_state.load() == pool_state::stopped)
+                    throw std::runtime_error("wait_one() called on a stopped worker_pool");
 
-            if (rc < 0)
-            {
-                if (errno == EINTR)
+                auto fds = pollable_fds();
+
+                if (fds.empty())
+                {
+                    // Work exists, but no worker is currently waiting on a
+                    // response fd. Pending tasks may be waiting for busy slots
+                    // to finish or for the next dispatch pass to accept them.
+                    lock.unlock();
+                    std::this_thread::sleep_for(m_options.poll_timeout);
+                    continue;
+                }
+
+                const int rc = ::poll(
+                    fds.data(),
+                    fds.size(),
+                    static_cast<int>(m_options.poll_timeout.count())
+                );
+
+                if (rc < 0)
+                {
+                    if (errno == EINTR)
+                        continue;
+
+                    throw std::runtime_error("worker_pool poll() failed");
+                }
+
+                // timeout
+                if (rc == 0)
                     continue;
 
-                throw std::runtime_error("worker_pool poll() failed");
-            }
+                for (const auto& pfd : fds)
+                {
+                    if (pfd.revents == 0)
+                        continue;
 
-            if (rc == 0)
-                continue;
-
-            for (const auto& pfd : fds)
-            {
-                if (pfd.revents == 0)
-                    continue;
-
-                if (auto result = collect_worker_event(pfd))
-                    return *result;
+                    if (auto result = collect_worker_event(pfd))
+                        return *result;
+                }
             }
         }
     }
@@ -334,26 +416,34 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     void worker_pool<F, Ts...>::stop() noexcept
     {
-        if (m_state != pool_state::stopped)
-            m_state = pool_state::finishing;
+        pool_state expected = pool_state::accepting;
+        (void)m_state.compare_exchange_strong(expected, pool_state::finishing);
+        m_pending_cv.notify_all();
     }
 
 
     template <typename F, typename... Ts>
     void worker_pool<F, Ts...>::stop_immediately() noexcept
     {
-        m_state = pool_state::stopped;
+        m_state.store(pool_state::stopped);
 
-        clear_pending(m_pending);
+        {
+            std::scoped_lock lock(m_pending_mutex, m_workers_mutex);
 
-        for (auto& item : m_workers)
-            item.stop();
+            clear_pending(m_pending);
+
+            for (auto& item : m_workers)
+                item.stop();
+        }
+
+        m_pending_cv.notify_all();
     }
 
 
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::submitted() const noexcept
     {
+        std::lock_guard lock(m_pending_mutex);
         return m_submitted;
     }
 
@@ -361,6 +451,7 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::finished() const noexcept
     {
+        std::lock_guard lock(m_workers_mutex);
         return m_finished;
     }
 
@@ -368,6 +459,7 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::pending() const noexcept
     {
+        std::lock_guard lock(m_pending_mutex);
         return m_pending.size();
     }
 
@@ -375,6 +467,7 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::inflight() const noexcept
     {
+        std::lock_guard lock(m_workers_mutex);
         std::size_t count = 0;
 
         for (const auto& item : m_workers)
@@ -390,6 +483,7 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     std::size_t worker_pool<F, Ts...>::worker_count() const noexcept
     {
+        std::lock_guard lock(m_workers_mutex);
         return m_workers.size();
     }
 
@@ -397,28 +491,38 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::accepting() const noexcept
     {
-        return m_state == pool_state::accepting;
+        return m_state.load() == pool_state::accepting;
     }
 
 
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::stopped() const noexcept
     {
-        return m_state == pool_state::stopped;
+        return m_state.load() == pool_state::stopped;
     }
 
 
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::drained() const noexcept
     {
-        return m_state == pool_state::finishing && !has_work();
+        std::scoped_lock lock(m_pending_mutex, m_workers_mutex);
+        return m_state.load() == pool_state::finishing && !has_work();
     }
 
 
     template <typename F, typename... Ts>
     bool worker_pool<F, Ts...>::has_work() const noexcept
     {
-        return !m_pending.empty() || inflight() != 0;
+        if (!m_pending.empty())
+            return true;
+
+        for (const auto& item : m_workers)
+        {
+            if (item.busy())
+                return true;
+        }
+
+        return false;
     }
 
 
@@ -510,7 +614,7 @@ namespace hotfuzz
             if (!current_worker.alive())
                 spawn_worker_or_throw(i);
 
-            if (current_worker.busy())
+            if (!current_worker.idle())
                 continue;
 
             task item = std::move(m_pending.front());

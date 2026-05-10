@@ -21,6 +21,7 @@
 #include "utils.hpp"
 #include "protocol/packet_manager.hpp"
 #include "worker/specs.h"
+#include "worker/utils.hpp"
 
 namespace hotfuzz
 {
