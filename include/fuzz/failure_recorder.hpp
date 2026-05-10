@@ -30,7 +30,7 @@ namespace hotfuzz
 
 
     /**
-     * @brief Writes reproducible artifacts for exceptions and crashes.
+     * @brief Writes reproducible artifacts for every non-ok fuzz result.
      */
     class failure_recorder
     {
@@ -68,13 +68,21 @@ namespace hotfuzz
         template <typename... Ts>
         std::optional<recorded_failure> record_result(const isolated_result<Ts...>& result)
         {
+            if (result.status == isolated_status::ok)
+                return std::nullopt;
+
             if (result.status == isolated_status::exception)
                 return record_exception(result.task_id, result.args, result.message);
 
             if (result.status == isolated_status::crash)
                 return record_crash(result.task_id, result.args, signal_name(result.signal_number));
 
-            return std::nullopt;
+            return record(
+                isolated_status_name(result.status),
+                result.task_id,
+                result.args,
+                result.message.empty() ? isolated_status_name(result.status) : result.message
+            );
         }
 
     private:

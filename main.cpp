@@ -239,6 +239,9 @@ namespace demo
                 .use_recorder = true,
                 .output_dir = output_dir,
                 .num_workers = 10,
+                .timeouts = hotfuzz::worker_timeouts {
+                    .task_timeout = std::chrono::milliseconds { 2000 },
+                },
                 .verbosity = hotfuzz::verbosity_options {
                     .enabled = true,
                     .recent_failure_limit = 6,
