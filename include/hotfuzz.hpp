@@ -11,6 +11,7 @@
 #include "fuzz/specs.h"
 #include "fuzz/utils.hpp"
 #include "serialization/api.hpp"
+#include "verbosity/scraper.hpp"
 
 namespace hotfuzz
 {

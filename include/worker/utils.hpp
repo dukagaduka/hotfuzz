@@ -57,9 +57,15 @@ namespace hotfuzz
             case SIGABRT: return "SIGABRT";
             case SIGFPE:  return "SIGFPE";
             case SIGILL:  return "SIGILL";
+#ifdef SIGBUS
             case SIGBUS:  return "SIGBUS";
+#endif
+#ifdef SIGKILL
             case SIGKILL: return "SIGKILL";
+#endif
+#ifdef SIGTERM
             case SIGTERM: return "SIGTERM";
+#endif
 
             default: return "signal(" + std::to_string(sig) + ")";
         }

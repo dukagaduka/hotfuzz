@@ -14,6 +14,10 @@ target_include_directories(hotfuzz
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/include
 )
 
+if (WIN32)
+    target_link_libraries(hotfuzz INTERFACE psapi)
+endif()
+
 # Исполняемый файл остается как был
 add_executable(app main.cpp)
 target_link_libraries(app PRIVATE hotfuzz)
