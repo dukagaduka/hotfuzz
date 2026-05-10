@@ -25,12 +25,14 @@ namespace hotfuzz
      * @brief Public fuzzing runtime options.
      *
      * num_workers == -1 keeps the default hardware_concurrency() based sizing.
-     * output_dir receives errors_and_crashes.json and serialized argument blobs.
+     * use_recorder enables errors_and_crashes.json and serialized argument blobs.
+     * output_dir receives recorder artifacts when use_recorder == true.
      * input_bin is used only by run_mode::bin.
      */
     struct fuzz_options
     {
         bool isolation_mode { false };
+        bool use_recorder { true };
         std::filesystem::path output_dir { "hotfuzz_output" };
         std::filesystem::path input_bin {};
         int num_workers { -1 };

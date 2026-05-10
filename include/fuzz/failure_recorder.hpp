@@ -72,8 +72,9 @@ namespace hotfuzz
             const std::string& text
         )
         {
+            const std::uint64_t record_id = m_next_record_id++;
             const std::string file_name =
-                std::string(kind) + "_" + std::to_string(task_id) + ".args";
+                std::string(kind) + "_" + std::to_string(record_id) + ".args";
             const std::filesystem::path relative_path = std::filesystem::path("bin") / file_name;
             const std::filesystem::path full_path = m_output_dir / relative_path;
 
@@ -94,6 +95,8 @@ namespace hotfuzz
 
             m_entries.push_back(
                 {
+                    { "record_id", record_id },
+                    { "task_id", task_id },
                     { "result", std::string(kind) },
                     { "text", text },
                     { "path", relative_path.generic_string() }
@@ -118,7 +121,7 @@ namespace hotfuzz
         std::filesystem::path m_bin_dir;
         std::filesystem::path m_json_path;
         nlohmann::json m_entries;
-        
+        std::uint64_t m_next_record_id { 1 };
     };
 }
 

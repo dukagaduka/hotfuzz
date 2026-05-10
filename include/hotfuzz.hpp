@@ -2,6 +2,7 @@
 #define HOTFUZZ_HPP
 
 #include <concepts>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -36,18 +37,23 @@ namespace hotfuzz
         );
 
         auto& fn = f;
-        failure_recorder recorder(options.output_dir);
+        std::optional<failure_recorder> recorder;
+
+        if (options.use_recorder)
+            recorder.emplace(options.output_dir);
+
+        failure_recorder* recorder_ptr = recorder ? &*recorder : nullptr;
 
         if (!options.isolation_mode)
         {
-            utils::run_in_process_fuzz(fn, mode, options, recorder, providers...);
+            utils::run_in_process_fuzz(fn, mode, options, recorder_ptr, providers...);
             return;
         }
 
 #ifdef _WIN32
         throw std::runtime_error("hotfuzz isolation mode is not supported on WIN32");
 #else
-        utils::run_isolated_fuzz(fn, mode, options, recorder, providers...);
+        utils::run_isolated_fuzz(fn, mode, options, recorder_ptr, providers...);
 #endif
     }
 

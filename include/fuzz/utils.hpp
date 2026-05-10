@@ -131,7 +131,7 @@ namespace hotfuzz
             F& fn,
             const Tuple& args,
             std::uint64_t task_id,
-            failure_recorder& recorder
+            failure_recorder* recorder
         )
         {
             try
@@ -140,11 +140,13 @@ namespace hotfuzz
             }
             catch (const std::exception& e)
             {
-                recorder.record_exception(task_id, args, e.what());
+                if (recorder != nullptr)
+                    recorder->record_exception(task_id, args, e.what());
             }
             catch (...)
             {
-                recorder.record_exception(task_id, args, "unknown non-std exception");
+                if (recorder != nullptr)
+                    recorder->record_exception(task_id, args, "unknown non-std exception");
             }
         }
 
@@ -157,7 +159,7 @@ namespace hotfuzz
             F& f,
             ProvidersTuple& providers,
             StorageTuple& storage,
-            failure_recorder& recorder,
+            failure_recorder* recorder,
             std::uint64_t& task_id
         )
         {
@@ -192,7 +194,7 @@ namespace hotfuzz
         template <typename F, typename... Ts>
         void in_process_fuzz_zip_impl(
             F& f,
-            failure_recorder& recorder,
+            failure_recorder* recorder,
             std::uint64_t& task_id,
             base_provider<Ts>&... providers
         )
@@ -224,7 +226,7 @@ namespace hotfuzz
             F& fn,
             run_mode mode,
             const fuzz_options& options,
-            failure_recorder& recorder,
+            failure_recorder* recorder,
             base_provider<Ts>&... providers
         )
         {
@@ -240,7 +242,7 @@ namespace hotfuzz
 
             if (mode == run_mode::zip)
             {
-                in_process_fuzz_zip(fn, task_id, recorder, providers...)
+                in_process_fuzz_zip_impl(fn, recorder, task_id, providers...);
 
                 return;
             }
@@ -266,7 +268,7 @@ namespace hotfuzz
             F& fn,
             run_mode mode,
             const fuzz_options& options,
-            failure_recorder& recorder,
+            failure_recorder* recorder,
             base_provider<Ts>&... providers
         )
         {
@@ -288,14 +290,16 @@ namespace hotfuzz
 
             std::exception_ptr consumer_exception;
             std::thread consumer(
-                [&pool, &recorder, &consumer_exception]
+                [&pool, recorder, &consumer_exception]
                 {
                     try
                     {
                         while (true)
                         {
                             auto result = pool.wait_one();
-                            recorder.record_result(result);
+
+                            if (recorder != nullptr)
+                                recorder->record_result(result);
                         }
                     }
                     catch (const std::runtime_error&)
