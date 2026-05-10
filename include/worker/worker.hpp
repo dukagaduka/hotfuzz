@@ -18,7 +18,7 @@
 #include <unistd.h>
 #include <utility>
 
-#include "utils.hpp"
+#include "fuzz/calling_utils.hpp"
 #include "protocol/packet_manager.hpp"
 #include "worker/specs.h"
 #include "worker/utils.hpp"
@@ -669,7 +669,7 @@ namespace hotfuzz
             {
                 // User code runs only in the child. Exceptions are converted
                 // to protocol responses; fatal signals are observed by parent.
-                call_with_tuple(m_fn, request.as_tuple());
+                utils::call_with_tuple(m_fn, request.as_tuple());
 
                 try
                 {

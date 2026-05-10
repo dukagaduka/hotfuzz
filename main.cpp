@@ -22,9 +22,11 @@ int main()
             std::cout << "value: " << (x + y) << '\n';
         },
         hotfuzz::run_mode::zip,
+        hotfuzz::fuzz_options {
+            .isolation_mode = false
+        },
         x_provider,
-        y_provider,
-        false
+        y_provider
     );
 
     x_provider.reset();
@@ -42,9 +44,11 @@ int main()
                 ::raise(SIGSEGV);
         },
         hotfuzz::run_mode::grid,
+        hotfuzz::fuzz_options {
+            .isolation_mode = true
+        },
         x_provider,
-        y_provider,
-        true
+        y_provider
     );
 
     return 0;

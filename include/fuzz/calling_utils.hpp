@@ -1,5 +1,5 @@
-#ifndef UTILS_HPP
-#define UTILS_HPP
+#ifndef FUZZ_CALLING_UTILS_HPP
+#define FUZZ_CALLING_UTILS_HPP
 
 #include <concepts>
 #include <functional>
@@ -56,4 +56,4 @@ namespace hotfuzz
     }
 }
 
-#endif // UTILS_HPP
+#endif // FUZZ_CALLING_UTILS_HPP

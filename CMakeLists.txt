@@ -11,6 +11,7 @@ target_compile_features(hotfuzz INTERFACE cxx_std_23)
 target_include_directories(hotfuzz
     INTERFACE 
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/include
 )
 
 # Исполняемый файл остается как был
