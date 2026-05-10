@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -18,6 +19,16 @@
 
 namespace hotfuzz
 {
+    struct recorded_failure
+    {
+        std::uint64_t record_id {};
+        std::uint64_t task_id {};
+        std::string result;
+        std::string text;
+        std::string artifact_path;
+    };
+
+
     /**
      * @brief Writes reproducible artifacts for exceptions and crashes.
      */
@@ -35,37 +46,40 @@ namespace hotfuzz
         }
 
         template <typename... Ts>
-        void record_exception(
+        recorded_failure record_exception(
             std::uint64_t task_id,
             const std::tuple<Ts...>& args,
             const std::string& text
         )
         {
-            record("exception", task_id, args, text);
+            return record("exception", task_id, args, text);
         }
 
         template <typename... Ts>
-        void record_crash(
+        recorded_failure record_crash(
             std::uint64_t task_id,
             const std::tuple<Ts...>& args,
             const std::string& text
         )
         {
-            record("crash", task_id, args, text);
+            return record("crash", task_id, args, text);
         }
 
         template <typename... Ts>
-        void record_result(const isolated_result<Ts...>& result)
+        std::optional<recorded_failure> record_result(const isolated_result<Ts...>& result)
         {
             if (result.status == isolated_status::exception)
-                record_exception(result.task_id, result.args, result.message);
-            else if (result.status == isolated_status::crash)
-                record_crash(result.task_id, result.args, signal_name(result.signal_number));
+                return record_exception(result.task_id, result.args, result.message);
+
+            if (result.status == isolated_status::crash)
+                return record_crash(result.task_id, result.args, signal_name(result.signal_number));
+
+            return std::nullopt;
         }
 
     private:
         template <typename... Ts>
-        void record(
+        recorded_failure record(
             std::string_view kind,
             std::uint64_t task_id,
             const std::tuple<Ts...>& args,
@@ -104,6 +118,14 @@ namespace hotfuzz
             );
 
             flush();
+
+            return recorded_failure {
+                .record_id = record_id,
+                .task_id = task_id,
+                .result = std::string(kind),
+                .text = text,
+                .artifact_path = relative_path.generic_string()
+            };
         }
 
         void flush() const

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 
+#include "verbosity/specs.h"
 #include "worker/specs.h"
 
 namespace hotfuzz
@@ -39,6 +40,7 @@ namespace hotfuzz
         std::size_t max_dispatch_attempts { 3 };
         std::chrono::milliseconds poll_timeout { 10 };
         worker_timeouts timeouts {};
+        verbosity_options verbosity {};
     };
 }
 

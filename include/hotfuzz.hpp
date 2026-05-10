@@ -11,7 +11,7 @@
 #include "fuzz/specs.h"
 #include "fuzz/utils.hpp"
 #include "serialization/api.hpp"
-#include "verbosity/scraper.hpp"
+#include "verbosity/dashboard.hpp"
 
 namespace hotfuzz
 {
@@ -39,22 +39,27 @@ namespace hotfuzz
 
         auto& fn = f;
         std::optional<failure_recorder> recorder;
+        std::optional<console_dashboard> dashboard;
 
         if (options.use_recorder)
             recorder.emplace(options.output_dir);
 
+        if (options.verbosity.enabled)
+            dashboard.emplace(options.verbosity);
+
         failure_recorder* recorder_ptr = recorder ? &*recorder : nullptr;
+        console_dashboard* dashboard_ptr = dashboard ? &*dashboard : nullptr;
 
         if (!options.isolation_mode)
         {
-            utils::run_in_process_fuzz(fn, mode, options, recorder_ptr, providers...);
+            utils::run_in_process_fuzz(fn, mode, options, recorder_ptr, dashboard_ptr, providers...);
             return;
         }
 
 #ifdef _WIN32
         throw std::runtime_error("hotfuzz isolation mode is not supported on WIN32");
 #else
-        utils::run_isolated_fuzz(fn, mode, options, recorder_ptr, providers...);
+        utils::run_isolated_fuzz(fn, mode, options, recorder_ptr, dashboard_ptr, providers...);
 #endif
     }
 

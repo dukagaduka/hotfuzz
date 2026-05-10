@@ -1,7 +1,10 @@
 #ifndef VERBOSITY_SPECS_H
 #define VERBOSITY_SPECS_H
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace hotfuzz
 {
@@ -22,6 +25,57 @@ namespace hotfuzz
         std::uint64_t ram_available_bytes {};
         std::uint64_t ram_used_bytes {};
         std::uint64_t process_rss_bytes {};
+    };
+
+
+    /**
+     * @brief Failure categories shown in the live console dashboard.
+     */
+    enum class failure_kind : std::uint8_t
+    {
+        exception,
+        crash,
+        timeout,
+        protocol_error,
+        ipc_error,
+        internal_error
+    };
+
+
+    /**
+     * @brief One recent failure displayed by the dashboard.
+     */
+    struct failure_event
+    {
+        failure_kind kind { failure_kind::exception };
+        std::uint64_t task_id {};
+        std::uint64_t record_id {};
+        bool has_record_id { false };
+        std::string text;
+        std::string artifact_path;
+    };
+
+
+    /**
+     * @brief Color policy for the live console dashboard.
+     */
+    enum class color_mode : std::uint8_t
+    {
+        auto_detect,
+        always,
+        never
+    };
+
+
+    /**
+     * @brief Runtime options for the live console dashboard.
+     */
+    struct verbosity_options
+    {
+        bool enabled { false };
+        std::size_t recent_failure_limit { 10 };
+        std::chrono::milliseconds refresh_interval { 250 };
+        color_mode colors { color_mode::auto_detect };
     };
 }
 

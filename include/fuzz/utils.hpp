@@ -20,6 +20,7 @@
 #include "fuzz/failure_recorder.hpp"
 #include "fuzz/calling_utils.hpp"
 #include "fuzz/specs.h"
+#include "verbosity/dashboard.hpp"
 
 #ifndef _WIN32
 #include "worker/worker_pool.hpp"
@@ -54,8 +55,85 @@ namespace hotfuzz
 
     namespace utils
     {
+        [[nodiscard]] inline failure_event make_exception_event(
+            std::uint64_t task_id,
+            const std::string& text,
+            const std::optional<recorded_failure>& artifact = std::nullopt
+        )
+        {
+            failure_event event {
+                .kind = failure_kind::exception,
+                .task_id = task_id,
+                .text = text
+            };
+
+            if (artifact)
+            {
+                event.record_id = artifact->record_id;
+                event.has_record_id = true;
+                event.artifact_path = artifact->artifact_path;
+            }
+
+            return event;
+        }
+
+
+#ifndef _WIN32
+        template <typename... Ts>
+        [[nodiscard]] failure_event make_isolated_failure_event(
+            const isolated_result<Ts...>& result,
+            const std::optional<recorded_failure>& artifact = std::nullopt
+        )
+        {
+            failure_event event {
+                .task_id = result.task_id
+            };
+
+            switch (result.status)
+            {
+                case isolated_status::exception:
+                    event.kind = failure_kind::exception;
+                    event.text = result.message;
+                    break;
+                case isolated_status::crash:
+                    event.kind = failure_kind::crash;
+                    event.text = signal_name(result.signal_number);
+                    break;
+                case isolated_status::timeout:
+                    event.kind = failure_kind::timeout;
+                    event.text = result.message.empty() ? "timeout" : result.message;
+                    break;
+                case isolated_status::protocol_error:
+                    event.kind = failure_kind::protocol_error;
+                    event.text = result.message.empty() ? "protocol error" : result.message;
+                    break;
+                case isolated_status::ipc_error:
+                    event.kind = failure_kind::ipc_error;
+                    event.text = result.message.empty() ? "ipc error" : result.message;
+                    break;
+                case isolated_status::internal_error:
+                    event.kind = failure_kind::internal_error;
+                    event.text = result.message.empty() ? "internal error" : result.message;
+                    break;
+                default:
+                    event.kind = failure_kind::internal_error;
+                    event.text = isolated_status_name(result.status);
+                    break;
+            }
+
+            if (artifact)
+            {
+                event.record_id = artifact->record_id;
+                event.has_record_id = true;
+                event.artifact_path = artifact->artifact_path;
+            }
+
+            return event;
+        }
+#endif
+
         // ---------------------------------------------------------------------
-        // Isolated fuzzing modes implemenatations
+        // Isolated fuzzing modes implementations
         // ---------------------------------------------------------------------
 
 
@@ -114,7 +192,7 @@ namespace hotfuzz
 
 
         // ---------------------------------------------------------------------
-        // In-process fuzzing modes implemenatations
+        // In-process fuzzing modes implementations
         // ---------------------------------------------------------------------
 
 
@@ -131,7 +209,8 @@ namespace hotfuzz
             F& fn,
             const Tuple& args,
             std::uint64_t task_id,
-            failure_recorder* recorder
+            failure_recorder* recorder,
+            console_dashboard* dashboard
         )
         {
             try
@@ -140,13 +219,24 @@ namespace hotfuzz
             }
             catch (const std::exception& e)
             {
+                std::optional<recorded_failure> artifact;
+
                 if (recorder != nullptr)
-                    recorder->record_exception(task_id, args, e.what());
+                    artifact = recorder->record_exception(task_id, args, e.what());
+
+                if (dashboard != nullptr)
+                    dashboard->publish(make_exception_event(task_id, e.what(), artifact));
             }
             catch (...)
             {
+                constexpr const char* text = "unknown non-std exception";
+                std::optional<recorded_failure> artifact;
+
                 if (recorder != nullptr)
-                    recorder->record_exception(task_id, args, "unknown non-std exception");
+                    artifact = recorder->record_exception(task_id, args, text);
+
+                if (dashboard != nullptr)
+                    dashboard->publish(make_exception_event(task_id, text, artifact));
             }
         }
 
@@ -160,6 +250,7 @@ namespace hotfuzz
             ProvidersTuple& providers,
             StorageTuple& storage,
             failure_recorder* recorder,
+            console_dashboard* dashboard,
             std::uint64_t& task_id
         )
         {
@@ -175,11 +266,11 @@ namespace hotfuzz
                     if constexpr (I + 1 == std::tuple_size_v<StorageTuple>)
                     {
                         auto invocation_args = materialize_args(storage);
-                        invoke_in_process(f, invocation_args, task_id++, recorder);
+                        invoke_in_process(f, invocation_args, task_id++, recorder, dashboard);
                     }
                     else
                     {
-                        in_process_fuzz_grid_impl<I + 1>(f, providers, storage, recorder, task_id);
+                        in_process_fuzz_grid_impl<I + 1>(f, providers, storage, recorder, dashboard, task_id);
                     }
                 }
                 catch (const exhaustion_signal&)
@@ -195,6 +286,7 @@ namespace hotfuzz
         void in_process_fuzz_zip_impl(
             F& f,
             failure_recorder* recorder,
+            console_dashboard* dashboard,
             std::uint64_t& task_id,
             base_provider<Ts>&... providers
         )
@@ -204,7 +296,7 @@ namespace hotfuzz
                 try
                 {
                     auto args = std::tuple<Ts...>{ providers.iter()... };
-                    invoke_in_process(f, args, task_id++, recorder);
+                    invoke_in_process(f, args, task_id++, recorder, dashboard);
                 }
                 catch (const exhaustion_signal&)
                 {
@@ -227,6 +319,7 @@ namespace hotfuzz
             run_mode mode,
             const fuzz_options& options,
             failure_recorder* recorder,
+            console_dashboard* dashboard,
             base_provider<Ts>&... providers
         )
         {
@@ -235,14 +328,14 @@ namespace hotfuzz
             if (mode == run_mode::bin)
             {
                 auto args = load_fuzz_args<Ts...>(options.input_bin);
-                invoke_in_process(fn, args, task_id, recorder);
+                invoke_in_process(fn, args, task_id, recorder, dashboard);
 
                 return;
             }
 
             if (mode == run_mode::zip)
             {
-                in_process_fuzz_zip_impl(fn, recorder, task_id, providers...);
+                in_process_fuzz_zip_impl(fn, recorder, dashboard, task_id, providers...);
 
                 return;
             }
@@ -252,12 +345,12 @@ namespace hotfuzz
                 auto provider_refs = std::forward_as_tuple(providers...);
                 auto storage = std::tuple<std::optional<Ts>...>{};
 
-                in_process_fuzz_grid_impl(fn, provider_refs, storage, recorder, task_id);
+                in_process_fuzz_grid_impl(fn, provider_refs, storage, recorder, dashboard, task_id);
             }
             else
             {
                 auto args = std::tuple<>{};
-                invoke_in_process(fn, args, task_id, recorder);
+                invoke_in_process(fn, args, task_id, recorder, dashboard);
             }
         }
 
@@ -269,6 +362,7 @@ namespace hotfuzz
             run_mode mode,
             const fuzz_options& options,
             failure_recorder* recorder,
+            console_dashboard* dashboard,
             base_provider<Ts>&... providers
         )
         {
@@ -290,16 +384,20 @@ namespace hotfuzz
 
             std::exception_ptr consumer_exception;
             std::thread consumer(
-                [&pool, recorder, &consumer_exception]
+                [&pool, recorder, dashboard, &consumer_exception]
                 {
                     try
                     {
                         while (true)
                         {
                             auto result = pool.wait_one();
+                            std::optional<recorded_failure> artifact;
 
                             if (recorder != nullptr)
-                                recorder->record_result(result);
+                                artifact = recorder->record_result(result);
+
+                            if (dashboard != nullptr && result.status != isolated_status::ok)
+                                dashboard->publish(make_isolated_failure_event(result, artifact));
                         }
                     }
                     catch (const std::runtime_error&)

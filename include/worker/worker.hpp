@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <optional>
+#include <poll.h>
 #include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -265,6 +266,8 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     inline bool worker<F, Ts...>::spawn()
     {
+        // spawn() is only valid from the fully stopped state. Reusing a half-open
+        // pid/fd pair would blur ownership and make later shutdown ambiguous.
         if (m_state != worker_state::stopped || m_pid > 0 || m_fd >= 0)
             return false;
 
@@ -305,6 +308,8 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     inline void worker<F, Ts...>::stop()
     {
+        // stop() is just the public lifecycle entrypoint. shutdown_child()
+        // contains the actual graceful/forceful teardown policy.
         shutdown_child();
     }
 
@@ -312,6 +317,8 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     inline bool worker<F, Ts...>::respawn()
     {
+        // respawn is a hard reset of the slot: forget the old child completely,
+        // then try to create a fresh one.
         stop();
         return spawn();
     }
@@ -324,6 +331,8 @@ namespace hotfuzz
         std::uint16_t flags
     )
     {
+        // send() is delivery only. It either hands the task to the child and
+        // marks it in-flight, or reports why that hand-off never completed.
         if (m_state == worker_state::stopped || m_pid <= 0 || m_fd < 0)
         {
             return {
@@ -344,6 +353,9 @@ namespace hotfuzz
 
         try
         {
+            // If this frame is written successfully, ownership of task execution
+            // moves to the child process. Parent-side bookkeeping happens only
+            // after that point.
             packet_manager<Ts...> packets(m_fd);
             packets.send_run(task_id, args, m_timeouts.send_timeout, flags);
         }
@@ -404,6 +416,8 @@ namespace hotfuzz
         task.task_id = task_id;
         task.args = args;
 
+        // The execution deadline starts only after the request was accepted by
+        // the worker. Queueing and dispatch retries are handled by the pool.
         if (m_timeouts.task_timeout.has_value())
             task.deadline = std::chrono::steady_clock::now() + *m_timeouts.task_timeout;
 
@@ -424,6 +438,9 @@ namespace hotfuzz
         if (m_state != worker_state::busy || !m_current_task.has_value())
             throw protocol_error("cannot receive without an in-flight worker task");
 
+        // Timeout handling lives outside packet_manager. If the task already
+        // crossed its deadline, classify that first before attempting a normal
+        // response read.
         if (auto expired_result = expire_if_timed_out(std::chrono::steady_clock::now()))
             return *expired_result;
 
@@ -437,6 +454,8 @@ namespace hotfuzz
                 "worker exited before sending response"
             ))
         {
+            // The child died before we could read a frame. At that point the
+            // channel is no longer trustworthy, so the slot must be recycled.
             m_state = worker_state::broken;
             shutdown_child();
 
@@ -445,6 +464,9 @@ namespace hotfuzz
 
         try
         {
+            // This is the ordinary happy-path read: wait for one response frame
+            // and let finish_task_from_response_packet() decide whether the
+            // worker stays reusable or becomes broken.
             packet_manager<Ts...> packets(m_fd);
             auto response = packets.receive(m_timeouts.frame_timeout);
 
@@ -464,6 +486,9 @@ namespace hotfuzz
         }
         catch (const disconnected_error& e)
         {
+            // A disconnected socket often means the child crashed or exited.
+            // Try to turn that low-level transport symptom into a concrete task
+            // outcome before falling back to generic IPC failure.
             if (auto exited = try_collect_child_exit_result(
                     task,
                     isolated_status::ipc_error,
@@ -484,6 +509,8 @@ namespace hotfuzz
         }
         catch (const ipc_error& e)
         {
+            // Same idea as disconnected_error: a generic IPC failure may still
+            // hide a more useful child exit status.
             if (auto exited = try_collect_child_exit_result(
                     task,
                     isolated_status::ipc_error,
@@ -504,6 +531,9 @@ namespace hotfuzz
         }
         catch (const protocol_error& e)
         {
+            // Protocol corruption may come either from a bad frame on the wire
+            // or from the child terminating after detecting a protocol problem.
+            // Prefer the explicit child exit classification when available.
             if (auto exited = try_collect_child_exit_result(
                     task,
                     isolated_status::protocol_error,
@@ -550,6 +580,9 @@ namespace hotfuzz
         std::chrono::steady_clock::time_point now
     )
     {
+        // This helper answers one narrow question: has the current in-flight
+        // task exceeded its execution deadline, and if so is it truly a timeout
+        // rather than a crash/response that is already about to surface?
         if (m_state != worker_state::busy || !m_current_task.has_value())
             return std::nullopt;
 
@@ -558,6 +591,78 @@ namespace hotfuzz
         if (!task.deadline.has_value() || now < *task.deadline)
             return std::nullopt;
 
+        // First, do a zero-wait fd check. If the socket is already readable or
+        // hung up, let the regular receive() path interpret the event instead of
+        // flattening it into TIMEOUT here.
+        if (m_fd >= 0)
+        {
+            pollfd pfd {};
+            pfd.fd = m_fd;
+            pfd.events = POLLIN | POLLHUP | POLLERR;
+            pfd.revents = 0;
+
+            const int rc = ::poll(&pfd, 1, 0);
+
+            if (rc > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
+                return std::nullopt;
+        }
+
+        if (auto exited_result = try_collect_child_exit_result(
+                task,
+                isolated_status::timeout,
+                "worker task timed out"
+            ))
+        {
+            // The child is already dead, so we can return its real outcome now.
+            m_state = worker_state::broken;
+            shutdown_child();
+
+            return *exited_result;
+        }
+
+        if (m_fd >= 0)
+        {
+            pollfd pfd {};
+            pfd.fd = m_fd;
+            pfd.events = POLLIN | POLLHUP | POLLERR;
+            pfd.revents = 0;
+
+            // The deadline still stays mandatory, but a crash/response that is
+            // already in flight at the boundary should be classified by
+            // receive()/waitpid(), not flattened into TIMEOUT because the
+            // parent observed the deadline a few milliseconds earlier.
+            constexpr auto timeout_grace = std::chrono::milliseconds { 10 };
+            const auto wait_for_terminal_event = std::min(m_timeouts.frame_timeout, timeout_grace);
+
+            const int rc = ::poll(
+                &pfd,
+                1,
+                static_cast<int>(wait_for_terminal_event.count())
+            );
+
+            // This small grace period handles the deadline boundary race:
+            // parent noticed the deadline first, but the crash/response is only
+            // a few milliseconds away from becoming visible on the fd.
+            if (rc > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
+                return std::nullopt;
+        }
+
+        if (auto exited_result = try_collect_child_exit_result(
+                task,
+                isolated_status::timeout,
+                "worker task timed out"
+            ))
+        {
+            // Re-check waitpid() after the grace window, because the child may
+            // have finished without making the fd immediately readable.
+            m_state = worker_state::broken;
+            shutdown_child();
+
+            return *exited_result;
+        }
+
+        // Nothing terminal surfaced, and the deadline is still past due: this
+        // is treated as a real execution timeout and the child is discarded.
         m_state = worker_state::broken;
         auto result = make_task_result(task, isolated_status::timeout, "worker task timed out");
         shutdown_child();
@@ -633,6 +738,9 @@ namespace hotfuzz
 
             try
             {
+                // The child blocks here until the parent sends either:
+                // - run(task_id, args)
+                // - stop()
                 request = packets.receive();
             }
             catch (const protocol_error&)
@@ -655,6 +763,7 @@ namespace hotfuzz
 
             if (request.kind() == packet_kind::stop)
             {
+                // stop is the only graceful termination path for an idle child.
                 ::close(fd);
                 _exit(worker_exit_ok);
             }
@@ -673,6 +782,9 @@ namespace hotfuzz
 
                 try
                 {
+                    // Successful execution produces only an OK packet; the
+                    // parent reconstructs the full isolated_result from its own
+                    // copy of task metadata.
                     packets.send_ok(request.task_id(), m_timeouts.send_timeout);
                 }
                 catch (...)
@@ -699,6 +811,9 @@ namespace hotfuzz
             {
                 try
                 {
+                    // Non-std exceptions are surfaced to the parent in the same
+                    // result channel so they remain task outcomes, not worker
+                    // infrastructure failures.
                     packets.send_exception(
                         request.task_id(),
                         "Unknown non-std exception",
@@ -722,6 +837,9 @@ namespace hotfuzz
         std::string message
     ) const
     {
+        // All parent-side failure paths rebuild the result from the snapshot
+        // captured when the task was accepted, because the child or channel may
+        // already be unusable.
         result_type result {};
         result.task_id = task.task_id;
         result.status = status;
@@ -739,6 +857,8 @@ namespace hotfuzz
         std::string fallback_message
     ) const
     {
+        // waitpid() gives us process-level truth. Prefer that over generic
+        // transport wording whenever the child has already terminated.
         if (WIFSIGNALED(wait_status))
         {
             const int sig = WTERMSIG(wait_status);
@@ -803,6 +923,8 @@ namespace hotfuzz
         std::string fallback_message
     )
     {
+        // This is a pure non-blocking probe. It never waits for the child; it
+        // only answers whether a terminal status is already available now.
         if (m_pid <= 0)
             return std::nullopt;
 
@@ -839,6 +961,8 @@ namespace hotfuzz
 
         const auto task = *m_current_task;
 
+        // The response must belong to the exact task currently in flight.
+        // Anything else means parent and child streams diverged.
         if (response.task_id() != task.task_id)
         {
             // Mismatched ids mean parent and child disagree about stream
@@ -857,6 +981,8 @@ namespace hotfuzz
 
         if (response.kind() == packet_kind::ok)
         {
+            // OK and EXCEPTION are the only reusable outcomes: the child stayed
+            // protocol-synchronized and can accept another task immediately.
             m_current_task.reset();
             m_state = worker_state::idle;
 
@@ -901,6 +1027,9 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     inline void worker<F, Ts...>::shutdown_child() noexcept
     {
+        // Graceful stop is attempted only for an idle worker. If a task is
+        // active or the stream is already suspect, the safest policy is to tear
+        // the child down and spawn a fresh one later.
         const bool try_graceful = m_state == worker_state::idle && m_pid > 0 && m_fd >= 0;
 
         if (try_graceful)
@@ -919,6 +1048,9 @@ namespace hotfuzz
 
             while (m_pid > 0 && std::chrono::steady_clock::now() < deadline)
             {
+                // The child exits asynchronously after stop(). Poll waitpid()
+                // in a short loop so idle shutdown stays graceful when possible
+                // but does not hang indefinitely.
                 int status {};
                 const pid_t rc = ::waitpid(m_pid, &status, WNOHANG);
 
@@ -956,6 +1088,8 @@ namespace hotfuzz
     {
         if (m_fd >= 0)
         {
+            // fd ownership is parent-side only. Closing it early also helps the
+            // child notice teardown if it is still blocked on the socket.
             ::close(m_fd);
             m_fd = -1;
         }
@@ -965,6 +1099,8 @@ namespace hotfuzz
     template <typename F, typename... Ts>
     inline void worker<F, Ts...>::reset_parent_state() noexcept
     {
+        // After shutdown the slot goes back to the single well-defined base
+        // state from which spawn() may be called again.
         m_pid = -1;
         m_fd = -1;
         m_current_task.reset();

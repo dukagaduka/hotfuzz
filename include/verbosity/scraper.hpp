@@ -60,12 +60,6 @@ namespace hotfuzz
             return result.QuadPart;
         }
 
-        static std::size_t cpu_count()
-        {
-            const auto count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-            return std::max<std::size_t>(1, static_cast<std::size_t>(count));
-        }
-
         static std::optional<cpu_snapshot> read_cpu_snapshot()
         {
             FILETIME idle_time {};
@@ -147,8 +141,7 @@ namespace hotfuzz
                         100.0 * static_cast<double>(system_delta - idle_delta) /
                         static_cast<double>(system_delta);
                     metrics.cpu_process_percent =
-                        100.0 * static_cast<double>(process_delta) *
-                        static_cast<double>(cpu_count()) /
+                        100.0 * static_cast<double>(process_delta) /
                         static_cast<double>(system_delta);
                 }
             }
@@ -162,12 +155,6 @@ namespace hotfuzz
             std::uint64_t idle {};
             std::uint64_t process {};
         };
-
-        static std::size_t cpu_count()
-        {
-            const auto count = std::thread::hardware_concurrency();
-            return std::max<std::size_t>(1, count == 0 ? 1u : count);
-        }
 
         static std::optional<cpu_snapshot> read_cpu_snapshot()
         {
@@ -333,8 +320,7 @@ namespace hotfuzz
                         100.0 * static_cast<double>(total_delta - idle_delta) /
                         static_cast<double>(total_delta);
                     metrics.cpu_process_percent =
-                        100.0 * static_cast<double>(process_delta) *
-                        static_cast<double>(cpu_count()) /
+                        100.0 * static_cast<double>(process_delta) /
                         static_cast<double>(total_delta);
                 }
             }
