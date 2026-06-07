@@ -213,7 +213,7 @@ namespace demo
 
     void run_zip_crash_demo()
     {
-        constexpr std::size_t divider_count = 60000;
+        constexpr std::size_t divider_count = 600;
         constexpr std::uint32_t divider_seed = 19;
         constexpr std::uint32_t dividend_seed = 23;
         const std::filesystem::path output_dir = "demo_output/zip_crash";
@@ -233,14 +233,14 @@ namespace demo
 
         hotfuzz::fuzz(
             crash_target,
-            hotfuzz::run_mode::zip,
+            hotfuzz::run_mode::grid,
             hotfuzz::fuzz_options {
                 .isolation_mode = true,
                 .use_recorder = true,
                 .output_dir = output_dir,
                 .num_workers = 10,
                 .timeouts = hotfuzz::worker_timeouts {
-                    .task_timeout = std::chrono::milliseconds { 2000 },
+                    .task_timeout = std::chrono::milliseconds { 20000 },
                 },
                 .verbosity = hotfuzz::verbosity_options {
                     .enabled = true,

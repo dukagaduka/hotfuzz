@@ -1428,3 +1428,6 @@ erl_crash.dump
 # Another
 .build
 !include
+
+# Example outputs
+demo_output/
