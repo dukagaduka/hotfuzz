@@ -1,0 +1,8 @@
+.git
+.agents
+.codex
+build
+cmake-build-*
+demo_output
+deploy/.env
+deploy/output

@@ -1,0 +1,33 @@
+services:
+  hotfuzz:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: hotfuzz-runner:local
+    environment:
+      HOTFUZZ_BUILD_DIR: /workspace/.hotfuzz-build
+      HOTFUZZ_OUTPUT_DIR: /workspace/hotfuzz_output
+      HOTFUZZ_BUILD_TYPE: ${HOTFUZZ_BUILD_TYPE:-Release}
+      HOTFUZZ_ENABLE_SANITIZERS: ${HOTFUZZ_ENABLE_SANITIZERS:-0}
+      HOTFUZZ_CXX_FLAGS: ${HOTFUZZ_CXX_FLAGS:-}
+      HOTFUZZ_EXE_LINKER_FLAGS: ${HOTFUZZ_EXE_LINKER_FLAGS:-}
+      HOTFUZZ_RUN_UID: ${HOTFUZZ_RUN_UID:-1000}
+      HOTFUZZ_RUN_GID: ${HOTFUZZ_RUN_GID:-1000}
+      ASAN_OPTIONS: ${ASAN_OPTIONS:-abort_on_error=1:detect_leaks=0}
+      UBSAN_OPTIONS: ${UBSAN_OPTIONS:-halt_on_error=1:abort_on_error=1}
+    volumes:
+      - type: bind
+        source: ${HOTFUZZ_MAIN_CPP:?Set HOTFUZZ_MAIN_CPP in deploy/.env}
+        target: /workspace/main.cpp
+        read_only: true
+      - type: bind
+        source: ${HOTFUZZ_RECORDER_DIR:?Set HOTFUZZ_RECORDER_DIR in deploy/.env}
+        target: /workspace/hotfuzz_output
+        bind:
+          create_host_path: true
+      - hotfuzz-build-cache:/workspace/.hotfuzz-build
+    stdin_open: true
+    tty: true
+
+volumes:
+  hotfuzz-build-cache:

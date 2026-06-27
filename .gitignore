@@ -1431,3 +1431,4 @@ erl_crash.dump
 
 # Example outputs
 demo_output/
+deploy/output/
