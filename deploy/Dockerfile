@@ -14,10 +14,8 @@ RUN apt-get update \
         ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --gid 1000 hotfuzz \
-    && useradd --uid 1000 --gid hotfuzz --create-home --shell /bin/bash hotfuzz \
-    && mkdir -p /workspace /workspace/.hotfuzz-build /workspace/hotfuzz_output \
-    && chmod 0777 /workspace /workspace/.hotfuzz-build /workspace/hotfuzz_output /home/hotfuzz
+RUN mkdir -p /workspace /workspace/.hotfuzz-build /workspace/hotfuzz_output \
+    && chmod 0777 /workspace /workspace/.hotfuzz-build /workspace/hotfuzz_output
 
 WORKDIR /opt/hotfuzz
 
@@ -40,7 +38,6 @@ ENV HOTFUZZ_MAIN_CPP=/workspace/main.cpp
 ENV HOTFUZZ_BUILD_DIR=/workspace/.hotfuzz-build
 ENV HOTFUZZ_OUTPUT_DIR=/workspace/hotfuzz_output
 ENV HOTFUZZ_BUILD_TYPE=Release
-ENV HOTFUZZ_ENABLE_SANITIZERS=0
 ENV HOTFUZZ_RUN_USER=hotfuzz
 ENV HOTFUZZ_RUN_UID=1000
 ENV HOTFUZZ_RUN_GID=1000

@@ -19,8 +19,8 @@
  *   [ 32, 'A', 'A', ... 32 payload bytes ... ]
  *
  * The decoder sees that 32 payload bytes are available, then calls memcpy()
- * into a 16-byte local array. With AddressSanitizer enabled, this is reported
- * as a stack-buffer-overflow and the isolated worker aborts.
+ * into a 16-byte local array. In a plain build this is undefined behavior: it may corrupt stack memory, abort,
+ * or appear to continue depending on compiler, optimization level, and platform.
  *
  * How hotfuzz helps
  * -----------------
@@ -37,11 +37,6 @@
  *
  * How to analyze a result
  * -----------------------
- * Build with sanitizers enabled. With the provided Docker runner this is the
- * default in deploy/.env.example:
- *
- *   HOTFUZZ_ENABLE_SANITIZERS=1
- *
  * Run this example, then inspect:
  *
  *   deploy/output/buffer_overflow/errors_and_crashes.json
@@ -132,6 +127,12 @@ namespace
         opts.output_dir = recorder_dir();
         opts.num_workers = 1;
         opts.timeouts.task_timeout = std::chrono::milliseconds { 5000 };
+        opts.verbosity = hotfuzz::verbosity_options {
+            .enabled = true,
+            .recent_failure_limit = 6,
+            .refresh_interval = std::chrono::milliseconds { 150 },
+            .colors = hotfuzz::color_mode::auto_detect
+        };
         return opts;
     }
 }

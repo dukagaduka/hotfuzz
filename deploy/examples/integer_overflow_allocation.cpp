@@ -19,8 +19,8 @@
  *   16-bit count:    0
  *
  * The decoder allocates a zero-sized vector, then writes 65536 bytes through
- * operator[]. With AddressSanitizer enabled, this is reported as a heap buffer
- * overflow or invalid write.
+ * operator[]. In a plain build this is undefined behavior and may manifest as a crash,
+ * allocator failure, or silent memory corruption depending on the platform.
  *
  * How hotfuzz helps
  * -----------------
@@ -94,8 +94,14 @@ namespace
         opts.isolation_mode = true;
         opts.use_recorder = true;
         opts.output_dir = recorder_dir();
-        opts.num_workers = 1;
-        opts.timeouts.task_timeout = std::chrono::milliseconds { 5000 };
+        opts.num_workers = 5;
+        opts.timeouts.task_timeout = std::chrono::milliseconds { 200 };
+        opts.verbosity = hotfuzz::verbosity_options {
+            .enabled = true,
+            .recent_failure_limit = 6,
+            .refresh_interval = std::chrono::milliseconds { 150 },
+            .colors = hotfuzz::color_mode::auto_detect
+        };
         return opts;
     }
 }

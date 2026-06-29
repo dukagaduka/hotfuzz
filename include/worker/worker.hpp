@@ -209,6 +209,21 @@ namespace hotfuzz
         );
 
         /**
+         * @brief Waits briefly for a terminal child status after a transport EOF/HUP.
+         *
+         * A fatal target signal often becomes visible to the parent as socket EOF
+         * before waitpid(WNOHANG) can reap the child. This helper gives the
+         * kernel a short bounded window to publish the real process outcome so
+         * target crashes are not flattened into generic IPC failures.
+         */
+        [[nodiscard]] std::optional<result_type> wait_for_child_exit_result(
+            const current_task& task,
+            isolated_status fallback_status,
+            std::string fallback_message,
+            std::chrono::milliseconds wait_for
+        );
+
+        /**
          * @brief Validates and converts one response packet for the in-flight task.
          *
          * Reusable success/exception responses move the worker back to idle.
@@ -487,12 +502,13 @@ namespace hotfuzz
         catch (const disconnected_error& e)
         {
             // A disconnected socket often means the child crashed or exited.
-            // Try to turn that low-level transport symptom into a concrete task
-            // outcome before falling back to generic IPC failure.
-            if (auto exited = try_collect_child_exit_result(
+            // Wait briefly for waitpid() so this transport symptom can become
+            // a concrete crash/exit result instead of a generic IPC failure.
+            if (auto exited = wait_for_child_exit_result(
                     task,
                     isolated_status::ipc_error,
-                    e.what()
+                    e.what(),
+                    m_timeouts.frame_timeout
                 ))
             {
                 m_state = worker_state::broken;
@@ -509,12 +525,13 @@ namespace hotfuzz
         }
         catch (const ipc_error& e)
         {
-            // Same idea as disconnected_error: a generic IPC failure may still
-            // hide a more useful child exit status.
-            if (auto exited = try_collect_child_exit_result(
+            // Same idea as disconnected_error: EOF/HUP can arrive slightly
+            // before waitpid() exposes the child signal status.
+            if (auto exited = wait_for_child_exit_result(
                     task,
                     isolated_status::ipc_error,
-                    e.what()
+                    e.what(),
+                    m_timeouts.frame_timeout
                 ))
             {
                 m_state = worker_state::broken;
@@ -534,10 +551,11 @@ namespace hotfuzz
             // Protocol corruption may come either from a bad frame on the wire
             // or from the child terminating after detecting a protocol problem.
             // Prefer the explicit child exit classification when available.
-            if (auto exited = try_collect_child_exit_result(
+            if (auto exited = wait_for_child_exit_result(
                     task,
                     isolated_status::protocol_error,
-                    e.what()
+                    e.what(),
+                    m_timeouts.frame_timeout
                 ))
             {
                 m_state = worker_state::broken;
@@ -945,6 +963,34 @@ namespace hotfuzz
                 fallback_status,
                 std::move(fallback_message)
             );
+        }
+
+        return std::nullopt;
+    }
+
+
+    template <typename F, typename... Ts>
+    inline std::optional<typename worker<F, Ts...>::result_type> worker<F, Ts...>::wait_for_child_exit_result(
+        const current_task& task,
+        isolated_status fallback_status,
+        std::string fallback_message,
+        std::chrono::milliseconds wait_for
+    )
+    {
+        if (auto result = try_collect_child_exit_result(task, fallback_status, fallback_message))
+            return result;
+
+        if (wait_for <= std::chrono::milliseconds::zero() || m_pid <= 0)
+            return std::nullopt;
+
+        const auto deadline = std::chrono::steady_clock::now() + wait_for;
+
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds { 1 });
+
+            if (auto result = try_collect_child_exit_result(task, fallback_status, fallback_message))
+                return result;
         }
 
         return std::nullopt;

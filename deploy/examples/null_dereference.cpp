@@ -127,8 +127,14 @@ namespace
         opts.isolation_mode = true;
         opts.use_recorder = true;
         opts.output_dir = recorder_dir();
-        opts.num_workers = 1;
-        opts.timeouts.task_timeout = std::chrono::milliseconds { 5000 };
+        opts.num_workers = 5;
+        opts.timeouts.task_timeout = std::chrono::milliseconds { 1000 };
+        opts.verbosity = hotfuzz::verbosity_options {
+            .enabled = true,
+            .recent_failure_limit = 6,
+            .refresh_interval = std::chrono::milliseconds { 150 },
+            .colors = hotfuzz::color_mode::auto_detect
+        };
         return opts;
     }
 }

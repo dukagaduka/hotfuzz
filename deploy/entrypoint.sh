@@ -21,7 +21,7 @@ source_hash_file="/opt/hotfuzz/.hotfuzz-source.sha256"
 if [[ "${EUID}" -eq 0 && "${HOTFUZZ_ALREADY_DROPPED:-0}" != "1" ]]; then
     existing_group="$(getent group "${run_gid}" | cut -d ':' -f 1 || true)"
 
-    if [[ -n "${existing_group}" && "${existing_group}" != "${run_user}" ]]; then
+    if [[ -n "${existing_group}" ]]; then
         run_group="${existing_group}"
     else
         run_group="${run_user}"
@@ -33,16 +33,31 @@ if [[ "${EUID}" -eq 0 && "${HOTFUZZ_ALREADY_DROPPED:-0}" != "1" ]]; then
         fi
     fi
 
-    if id "${run_user}" >/dev/null 2>&1; then
-        usermod --uid "${run_uid}" --gid "${run_group}" "${run_user}"
+    existing_user="$(getent passwd "${run_uid}" | cut -d ':' -f 1 || true)"
+
+    if [[ -n "${existing_user}" ]]; then
+        effective_user="${existing_user}"
     else
-        useradd --uid "${run_uid}" --gid "${run_group}" --create-home --shell /bin/bash "${run_user}"
+        effective_user="${run_user}"
+
+        if id "${effective_user}" >/dev/null 2>&1; then
+            usermod --uid "${run_uid}" --gid "${run_group}" "${effective_user}"
+        else
+            useradd --uid "${run_uid}" --gid "${run_group}" --create-home --shell /bin/bash "${effective_user}"
+        fi
     fi
 
-    mkdir -p "${build_dir}" "${output_dir}"
-    chown -R "${run_uid}:${run_gid}" "${build_dir}" "${output_dir}" /home/"${run_user}" 2>/dev/null || true
-    chmod -R a+rwx "${build_dir}" "${output_dir}" /home/"${run_user}" 2>/dev/null || true
+    home_dir="$(getent passwd "${effective_user}" | cut -d ':' -f 6 || true)"
 
+    if [[ -z "${home_dir}" ]]; then
+        home_dir="/home/${effective_user}"
+    fi
+
+    mkdir -p "${build_dir}" "${output_dir}" "${home_dir}"
+    chown -R "${run_uid}:${run_gid}" "${build_dir}" "${output_dir}" "${home_dir}" 2>/dev/null || true
+    chmod -R a+rwx "${build_dir}" "${output_dir}" "${home_dir}" 2>/dev/null || true
+
+    export HOME="${home_dir}"
     export HOTFUZZ_ALREADY_DROPPED=1
     exec gosu "${run_uid}:${run_gid}" "$0" "$@"
 fi
@@ -64,12 +79,11 @@ if [[ -f "${source_hash_file}" ]]; then
     source_hash="$(<"${source_hash_file}")"
 fi
 
-build_key="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+build_key="$(printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
     "${main_hash}" \
     "${source_hash}" \
     "${build_type}" \
     "${generator}" \
-    "${HOTFUZZ_ENABLE_SANITIZERS:-0}" \
     "${HOTFUZZ_CXX_FLAGS:-}" \
     "${HOTFUZZ_EXE_LINKER_FLAGS:-}" \
     | sha256sum \
@@ -117,18 +131,8 @@ target_include_directories(hotfuzz_user_app PRIVATE
     /opt/hotfuzz/third_party/nlohmann/include
 )
 target_link_libraries(hotfuzz_user_app PRIVATE Threads::Threads)
+set_target_properties(hotfuzz_user_app PROPERTIES OUTPUT_NAME "hotfuzz-user-app")
 
-if("$ENV{HOTFUZZ_ENABLE_SANITIZERS}" STREQUAL "1")
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(hotfuzz_user_app PRIVATE
-            -fsanitize=address,undefined
-            -fno-omit-frame-pointer
-        )
-        target_link_options(hotfuzz_user_app PRIVATE
-            -fsanitize=address,undefined
-        )
-    endif()
-endif()
 
 if(DEFINED ENV{HOTFUZZ_CXX_FLAGS} AND NOT "$ENV{HOTFUZZ_CXX_FLAGS}" STREQUAL "")
     separate_arguments(HOTFUZZ_EXTRA_CXX_FLAGS UNIX_COMMAND "$ENV{HOTFUZZ_CXX_FLAGS}")

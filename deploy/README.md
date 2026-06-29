@@ -66,24 +66,20 @@ deploy/examples/integer_overflow_allocation.cpp
 Each example writes recorder artifacts under a separate subdirectory of
 `HOTFUZZ_OUTPUT_DIR`, which maps to `HOTFUZZ_RECORDER_DIR` on the host.
 
+The Docker runner builds examples as plain C++ programs. The terminal output is
+produced by the example and by hotfuzz itself.
+
 To run a different example, edit `HOTFUZZ_MAIN_CPP` in `deploy/.env`:
 
 ```env
-HOTFUZZ_MAIN_CPP=./examples/null_dereference.cpp
-```
-
-Memory-safety examples are most useful with sanitizers:
-
-```env
-HOTFUZZ_ENABLE_SANITIZERS=1
-HOTFUZZ_BUILD_TYPE=RelWithDebInfo
+HOTFUZZ_MAIN_CPP=./examples/buffer_overflow.cpp
 ```
 
 To replay a recorded artifact:
 
 ```bash
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml run --rm \
-  -e HOTFUZZ_INPUT_BIN=/workspace/hotfuzz_output/buffer_overflow/bin/crash_1.args \
+  -e HOTFUZZ_INPUT_BIN=/workspace/hotfuzz_output/null_dereference/bin/crash_1.args \
   hotfuzz
 ```
 
