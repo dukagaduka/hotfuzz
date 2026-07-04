@@ -90,6 +90,7 @@ namespace
             packet(4, 0x20),
             packet(15, 0x30),
             packet(16, 0x40),
+            // These packets are well-formed by length, but too large for payload[16].
             packet(17, 0x50),
             packet(32, 0x60),
             packet(64, 0x70)
@@ -104,11 +105,14 @@ namespace
         const std::size_t claimed_size = frame[0];
         const std::size_t available = frame.size() - 1;
 
+        // Validates only the source length: packet(32, ...) passes this check.
         if (available < claimed_size)
             return;
 
         char payload[16] {};
 
+        // Bug: claimed_size can be greater than sizeof(payload), so memcpy writes
+        // past the stack buffer and may crash or corrupt adjacent stack memory.
         std::memcpy(payload, frame.data() + 1, claimed_size);
 
         volatile unsigned checksum = 0;

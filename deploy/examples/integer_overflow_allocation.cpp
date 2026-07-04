@@ -76,11 +76,14 @@ namespace
         if (width > 512 || height > 512)
             return;
 
+        // Bug trigger: 256 * 256 is 65536, which wraps to 0 in uint16_t.
         const std::uint16_t allocated_pixels = static_cast<std::uint16_t>(width * height);
         const std::uint32_t real_pixels = static_cast<std::uint32_t>(width) * height;
 
+        // The wrapped value controls allocation, so pixels can be much too small.
         std::vector<std::uint8_t> pixels(allocated_pixels);
 
+        // The real value controls writes, so overflowed dimensions write past pixels.
         for (std::uint32_t i = 0; i < real_pixels; ++i)
             pixels[i] = static_cast<std::uint8_t>(i);
 
@@ -108,6 +111,7 @@ namespace
 
 int main()
 {
+    // grid mode will try pairs like 256 x 256 and 512 x 512.
     std::vector<std::uint16_t> widths { 1, 16, 255, 256, 300, 512 };
     std::vector<std::uint16_t> heights { 1, 16, 255, 256, 300, 512 };
 

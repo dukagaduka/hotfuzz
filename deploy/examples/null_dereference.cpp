@@ -82,8 +82,10 @@ namespace
         return {
             {},
             { 1, 2 },
+            // data before login: session_ptr is still null when opcode 2 runs.
             { 2 },
             { 0, 2 },
+            // logout clears the session; the following data command dereferences null.
             { 1, 3, 2 },
             { 3, 2 },
             { 0, 1, 2, 3 }
@@ -105,6 +107,7 @@ namespace
             if (opcode == 1)
             {
                 current_session.emplace(session { .account_id = 42, .admin = false });
+                // login initializes the pointer used by the data handler below.
                 session_ptr = &*current_session;
                 continue;
             }
@@ -112,10 +115,12 @@ namespace
             if (opcode == 3)
             {
                 current_session.reset();
+                // logout removes the state; a later data command now has no session.
                 session_ptr = nullptr;
                 continue;
             }
 
+            // Bug: opcode 2 assumes login already happened and dereferences session_ptr.
             volatile std::uint32_t account_id = session_ptr->account_id;
             (void)account_id;
         }
